@@ -287,6 +287,82 @@ class EmissionBSDF : public BSDF {
 
 }; // class EmissionBSDF
 
+/**
+ * Approximate BSSRDF (Bidirectional Scattering Surface Reflectance Distribution Function).
+ * Simulates subsurface scattering in skin/biological materials using an approximate diffuse-like model.
+ * This is the base layer for layered materials like lips with gloss.
+ */
+class ApproximateBSSRDF : public BSDF {
+ public:
+
+  /**
+   * ApproximateBSSRDF is constructed with a skin color and surface roughness.
+   * \param skin_color The base color of the skin/material
+   * \param roughness Surface micro-roughness for additional scattering detail
+   */
+  ApproximateBSSRDF(const Vector3D skin_color, double roughness = 0.3)
+    : skin_color(skin_color), roughness(roughness) { }
+
+  Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D get_emission() const { return Vector3D(); }
+  bool is_delta() const { return false; }
+
+  void render_debugger_node();
+
+ private:
+
+  Vector3D skin_color;
+  double roughness;
+  CosineWeightedHemisphereSampler3D sampler;
+
+}; // class ApproximateBSSRDF
+
+/**
+ * Layered BSDF.
+ * Combines a base BSSRDF layer (e.g., skin) with a glossy specular layer (e.g., gloss/lipstick).
+ * The thickness parameter controls the blend between base and gloss layers.
+ */
+class LayeredBSDF : public BSDF {
+ public:
+
+  /**
+   * LayeredBSDF is constructed with roughness, thickness, base color, saturation, and IOR.
+   * \param roughness Dielectric layer roughness (controls shine)
+   * \param thickness Opacity of gloss layer (0 = all base, 1 = all gloss)
+   * \param base_color Skin/lip color
+   * \param saturation Color saturation multiplier
+   * \param ior Index of refraction for the gloss layer (default 1.5)
+   */
+  LayeredBSDF(double roughness, double thickness, const Vector3D base_color,
+              double saturation, double ior = 1.5)
+    : roughness(roughness), thickness(thickness), base_color(base_color),
+      saturation(saturation), ior(ior),
+      base_layer(new ApproximateBSSRDF(base_color, roughness)) { }
+
+  ~LayeredBSDF() {
+    delete base_layer;
+  }
+
+  Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D get_emission() const { return Vector3D(); }
+  bool is_delta() const { return false; }
+
+  void render_debugger_node();
+
+ private:
+
+  double roughness;
+  double thickness;
+  Vector3D base_color;
+  double saturation;
+  double ior;
+  ApproximateBSSRDF* base_layer;
+  CosineWeightedHemisphereSampler3D sampler;
+
+}; // class LayeredBSDF
+
 }  // namespace CGL
 
 #endif  // CGL_STATICSCENE_BSDF_H

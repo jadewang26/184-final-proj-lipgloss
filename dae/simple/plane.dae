@@ -104,6 +104,14 @@
   <library_images/>
   <library_effects>
     <effect id="backWall_002-effect">
+      <profile_CGL>
+        <technique sid="CGL">
+          <approximate_bssrdf>
+            <skin_color>0.8 0.6 0.4</skin_color>
+            <roughness>0.25</roughness>
+          </approximate_bssrdf>
+        </technique>
+      </profile_CGL>
       <profile_COMMON>
         <technique sid="common">
           <phong>

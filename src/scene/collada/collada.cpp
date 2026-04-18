@@ -595,6 +595,8 @@ void ColladaParser::parse_light( XMLElement* xml, LightInfo& light ) {
         stat("Error: Missing falloff, constant, linear, quadratic definitions in spot light: " << light.id);
         exit(EXIT_FAILURE);
       }
+    } else if (type == "environment_light") {
+      light.light_type = LightType::AMBIENT;
     } else {
       stat("Error: Light type " << type << " in light: " << light.id << "is not supported");
       exit(EXIT_FAILURE);
@@ -1104,6 +1106,28 @@ void ColladaParser::parse_material ( XMLElement* xml, MaterialInfo& material ) {
           float roughness = atof(e_roughness->GetText());
           float ior = atof(e_ior->GetText());
           BSDF* bsdf = new GlassBSDF(transmittance, reflectance, roughness, ior);
+          material.bsdf = bsdf;
+        } else if (type == "approximate_bssrdf") {
+          XMLElement *e_skin_color = get_element(e_bsdf, "skin_color");
+          XMLElement *e_roughness = get_element(e_bsdf, "roughness");
+          Vector3D skin_color = spectrum_from_string(string(e_skin_color->GetText()));
+          double roughness = e_roughness ? atof(e_roughness->GetText()) : 0.3;
+          BSDF* bsdf = new ApproximateBSSRDF(skin_color, roughness);
+          material.bsdf = bsdf;
+        } else if (type == "layered") {
+          XMLElement *e_roughness = get_element(e_bsdf, "roughness");
+          XMLElement *e_thickness = get_element(e_bsdf, "thickness");
+          XMLElement *e_base_color = get_element(e_bsdf, "base_color");
+          XMLElement *e_saturation = get_element(e_bsdf, "saturation");
+          XMLElement *e_ior = get_element(e_bsdf, "ior");
+          
+          double roughness = e_roughness ? atof(e_roughness->GetText()) : 0.0;
+          double thickness = e_thickness ? atof(e_thickness->GetText()) : 0.5;
+          Vector3D base_color = e_base_color ? spectrum_from_string(string(e_base_color->GetText())) : Vector3D(0.8, 0.8, 0.8);
+          double saturation = e_saturation ? atof(e_saturation->GetText()) : 1.0;
+          double ior = e_ior ? atof(e_ior->GetText()) : 1.5;
+          
+          BSDF* bsdf = new LayeredBSDF(roughness, thickness, base_color, saturation, ior);
           material.bsdf = bsdf;
         }
         e_bsdf = e_bsdf->NextSiblingElement();
