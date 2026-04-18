@@ -192,7 +192,7 @@ Vector3D LayeredBSDF::f(const Vector3D wo, const Vector3D wi) {
  * Blends between base (diffuse) and gloss (Cook-Torrance specular) contributions.
  */
 Vector3D LayeredBSDF::f(const Vector3D wo, const Vector3D wi) {
-  // If either ray is below the surface, no light is reflected
+  // If either raywis below the surface, no light is reflected
   if (wo.z <= 0.0 || wi.z <= 0.0) return Vector3D(0, 0, 0);
 
   // --- Base Layer Evaluation ---
@@ -234,6 +234,9 @@ Vector3D LayeredBSDF::f(const Vector3D wo, const Vector3D wi) {
   double cos_theta_o = wo.z;
   double ct_val = (D * F * G) / (4.0 * cos_theta_i * cos_theta_o);
   
+  // Clamp specular values to prevent fireflies while preserving energy conservation
+  ct_val = min(ct_val, 1.0);
+  
   Vector3D gloss(ct_val, ct_val, ct_val);
 
   // Blend based on thickness parameter
@@ -250,47 +253,54 @@ Vector3D LayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf) {
   double random_sample = random_uniform();
   
   if (random_sample < thickness) {
-    // Sample from gloss (specular) layer
+    // Sample from gloss (specular) layer using cosine-weighted perturbation around reflection
     Vector3D reflected_dir;
     reflect(wo, &reflected_dir);
     
     if (roughness > 1e-5) {
-      // For rough gloss: perturb reflection direction with cosine-weighted hemisphere
+      // Sample perturbation from cosine-weighted hemisphere
       double perturb_pdf;
       Vector3D perturbation = sampler.get_sample(&perturb_pdf);
       
-      // Interpolate between pure reflection and diffuse based on roughness
-      double alpha = roughness;
-      *wi = (reflected_dir * (1.0 - alpha) + perturbation * alpha);
+      // Blend between reflection and perturbed direction based on roughness
+      // Higher roughness = more diffuse, lower roughness = more mirror-like
+      double blend_factor = min(roughness, 1.0);
+      *wi = (reflected_dir * (1.0 - blend_factor) + perturbation * blend_factor);
       wi->normalize();
+      
+      // PDF: (thickness) × (blended cosine-weighted distribution)
+      // When blend_factor = 0 (mirror), PDF approaches delta; when = 1 (diffuse), PDF = cos/PI
+      *pdf = thickness * (perturb_pdf * blend_factor + (1.0 - blend_factor) * 0.25);
     } else {
-      // Perfect mirror reflection
+      // Perfect mirror reflection - use a small but reasonable PDF
       *wi = reflected_dir;
+      *pdf = thickness * 0.25; // Smooth minimum PDF to avoid singularities
     }
-    
-    // PDF: thickness probability * directional probability for gloss layer
-    // For simplicity, assume uniform angular distribution around reflection
-    double angular_pdf = 1.0 / (2.0 * PI * max(roughness * roughness, 0.01));
-    *pdf = thickness * angular_pdf;
     
   } else {
     // Sample from base (diffuse) layer using cosine-weighted hemisphere
     double base_pdf;
     base_layer->sample_f(wo, wi, &base_pdf);
     
-    // PDF: (1.0 - thickness) probability * base layer's directional PDF
+    // PDF: (1.0 - thickness) × base_layer_pdf
     *pdf = (1.0 - thickness) * base_pdf;
   }
   
-  // Return the blended BSDF value properly normalized
+  // Evaluate BSDF at sampled direction
   Vector3D result = f(wo, *wi);
   
-  // Avoid division by very small PDF
-  if (*pdf < 1e-10) {
+  // Importance sampling: return result / pdf
+  // Clamp the final result to prevent fireflies
+  if (*pdf > 1e-10) {
+    result = result / *pdf;
+    // Clamp each channel to prevent extreme values
+    result.x = min(result.x, 10.0);
+    result.y = min(result.y, 10.0);
+    result.z = min(result.z, 10.0);
+    return result;
+  } else {
     return Vector3D(0, 0, 0);
   }
-  
-  return result / *pdf;
 }
 
 void LayeredBSDF::render_debugger_node()
