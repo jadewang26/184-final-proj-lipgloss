@@ -1127,7 +1127,10 @@ void ColladaParser::parse_material ( XMLElement* xml, MaterialInfo& material ) {
           double saturation = e_saturation ? atof(e_saturation->GetText()) : 1.0;
           double ior = e_ior ? atof(e_ior->GetText()) : 1.5;
           
-          BSDF* bsdf = new LayeredBSDF(roughness, thickness, base_color, saturation, ior);
+          // CHANGE LayeredBSDF HERE
+          // BSDF* bsdf = new LayeredBSDF(roughness, thickness, base_color, saturation, ior);
+          // BSDF* bsdf = new FastLayeredBSDF(roughness, thickness, base_color, saturation, ior);
+          BSDF* bsdf = new DisneyLayeredBSDF(roughness, thickness, base_color, saturation, ior);
           material.bsdf = bsdf;
         }
         e_bsdf = e_bsdf->NextSiblingElement();

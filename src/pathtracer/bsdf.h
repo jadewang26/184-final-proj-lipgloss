@@ -363,6 +363,91 @@ class LayeredBSDF : public BSDF {
 
 }; // class LayeredBSDF
 
+/**
+ * Fast Layered BSDF.
+ */
+class FastLayeredBSDF : public BSDF {
+ public:
+
+  /**
+   * \param roughness Dielectric layer roughness (controls shine)
+   * \param thickness Opacity of gloss layer (0 = all base, 1 = all gloss)
+   * \param base_color Skin/lip color
+   * \param saturation Color saturation multiplier
+   * \param ior Index of refraction for the gloss layer (default 1.5)
+   */
+  FastLayeredBSDF(double roughness, double thickness, const Vector3D base_color,
+              double saturation, double ior = 1.5)
+    : roughness(roughness), thickness(thickness), base_color(base_color),
+      saturation(saturation), ior(ior),
+      base_layer(new ApproximateBSSRDF(base_color, roughness)) { }
+
+  ~FastLayeredBSDF() {
+    delete base_layer;
+  }
+
+  Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D get_emission() const { return Vector3D(); }
+  bool is_delta() const { return false; }
+
+  void render_debugger_node();
+
+ private:
+
+  double roughness;
+  double thickness;
+  Vector3D base_color;
+  double saturation;
+  double ior;
+  ApproximateBSSRDF* base_layer;
+  CosineWeightedHemisphereSampler3D sampler;
+
+}; // class FastLayeredBSDF
+
+
+/**
+ * Disney Layered BSDF.
+ */
+class DisneyLayeredBSDF : public BSDF {
+ public:
+
+  /**
+   * \param roughness Dielectric layer roughness (controls shine)
+   * \param thickness Opacity of gloss layer (0 = all base, 1 = all gloss)
+   * \param base_color Skin/lip color
+   * \param saturation Color saturation multiplier
+   * \param ior Index of refraction for the gloss layer (default 1.5)
+   */
+  DisneyLayeredBSDF(double roughness, double thickness, const Vector3D base_color,
+              double saturation, double ior = 1.5)
+    : roughness(roughness), thickness(thickness), base_color(base_color),
+      saturation(saturation), ior(ior),
+      base_layer(new ApproximateBSSRDF(base_color, roughness)) { }
+
+  ~DisneyLayeredBSDF() {
+    delete base_layer;
+  }
+
+  Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D get_emission() const { return Vector3D(); }
+  bool is_delta() const { return false; }
+
+  void render_debugger_node();
+
+ private:
+
+  double roughness;
+  double thickness;
+  Vector3D base_color;
+  double saturation;
+  double ior;
+  ApproximateBSSRDF* base_layer;
+  CosineWeightedHemisphereSampler3D sampler;
+
+}; // class DisneyLayeredBSDF
+
 }  // namespace CGL
 
 #endif  // CGL_STATICSCENE_BSDF_H
