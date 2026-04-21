@@ -43,9 +43,13 @@
 		-->
 
 		<h2>Overview</h2>
-		We aim to implement a layered BSDF into our pathtracer with a base layer for skin (lips) and a dielectric layer for the gloss. We will also make sure there are three adjustable parameters: one for dielectric roughness to adjust the shine/glossiness, one for thickness to adjust the viscosity, and one for color/saturation.
+		So far, we have successfully established our foundational architecture by implementing a layered BRDF. The base lip layer utilizes a BSSRDF to capture the necessary subsurface scattering, and the top gloss layer uses a Cook-Torrance BRDF to accurately simulate specular reflections. To provide fine-grained control over the material's final appearance, we added parameters to the gloss layer such as Roughness (dictating the shine of the dielectric layer), Thickness (acting as the layer's opacity), Base Color, a Saturation multiplier, and the Index of Refraction (IOR). We then tested a normalized Blinn-Phong BRDF, which offered faster render times by avoiding the computationally expensive GGX distribution (uses square roots) but sacrificed overall gloss quality. We also tested the Disney BRDF, which yielded a more realistic, flesh-like appearance compared to the slightly plastic aesthetic of our initial Cook-Torrance implementation, so we will be going more in-depth with the Disney BRDF when we try experimenting with the parameters we’ve added to our gloss’ BRDF. We also are working on transitioning from testing on standard primitive spheres in a Cornell Box to loading and rendering a dedicated .dae (Collada) lip mesh, allowing us to evaluate our BRDFs on realistic lip geometry. 
 		<br>
 		<br>
+		In terms of our progress in regard to our schedule, we are running right on schedule, as we aimed to get a working render pipeline and start experimenting with different BRDFs around Week 2. I see no issue with proceeding as planning and getting our final renders done by Week 3 (for the different BRDFs and parameters) and aiming to get some of our reach goals done by Week 4.
+		<br>
+		<br>
+	<!---
     <div style="display: flex; flex-direction: column; align-items: center;">
 			<table style="width: 100%; text-align: center; border-collapse: collapse;">
 			  <tr>
@@ -80,7 +84,7 @@
 			  </tr>
 			</table>
 		</div>
-
+	-->
 	</div>
 	</body>
 </html>

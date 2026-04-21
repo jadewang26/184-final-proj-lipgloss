@@ -187,6 +187,7 @@ Vector3D LayeredBSDF::f(const Vector3D wo, const Vector3D wi) {
   return saturated_base * (1.0 - thickness) + gloss * thickness;
 }
 */
+
 /**
  * Evaluate Layered BSDF.
  * Blends between base (diffuse) and gloss (Cook-Torrance specular) contributions.
