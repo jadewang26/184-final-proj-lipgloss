@@ -221,7 +221,7 @@ public:
     return 0.5 * (erf(a) - 1.0 + exp(-a * a) / (a * PI));
   }
 
-  Vector3D F(const Vector3D wi);
+  Vector3D F(double cosThetaI);
 
   double G(const Vector3D wo, const Vector3D wi);
 

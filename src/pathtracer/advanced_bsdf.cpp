@@ -19,11 +19,9 @@ Vector3D MirrorBSDF::f(const Vector3D wo, const Vector3D wi) {
 }
 
 Vector3D MirrorBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf) {
-
-  // TODO:
-  // Implement MirrorBSDF
-  
-  return Vector3D();
+  reflect(wo, wi);
+  *pdf = 1.0;
+  return reflectance / abs_cos_theta(*wi);
 }
 
 void MirrorBSDF::render_debugger_node()
@@ -54,39 +52,74 @@ double MicrofacetBSDF::G(const Vector3D wo, const Vector3D wi) {
 }
 
 double MicrofacetBSDF::D(const Vector3D h) {
-  // TODO: proj3-2, part 3
-  // Compute Beckmann normal distribution function (NDF) here.
-  // You will need the roughness alpha.
-  
-  return 1.0;
+  const double cosTheta = h.z;
+  if (cosTheta <= 0.0) return 0.0;
+
+  const double cosTheta2 = cosTheta * cosTheta;
+  const double alpha2 = alpha * alpha;
+  const double tanTheta2 = sin_theta2(h) / cosTheta2;
+
+  return exp(-tanTheta2 / alpha2) / (PI * alpha2 * cosTheta2 * cosTheta2);
 }
 
-Vector3D MicrofacetBSDF::F(const Vector3D wi) {
-  // TODO: proj3-2, part 3
-  // Compute Fresnel term for reflection on dielectric-conductor interface.
-  // You will need both eta and etaK, both of which are Vector3D.
+Vector3D MicrofacetBSDF::F(double cosThetaI) {
+  const double cosTheta = clamp(fabs(cosThetaI), 0.0, 1.0);
+  const double cosTheta2 = cosTheta * cosTheta;
+  const Vector3D eta2 = eta * eta;
+  const Vector3D k2 = k * k;
+  const Vector3D t0 = eta2 + k2;
+  const Vector3D twoEtaCos = eta * (2.0 * cosTheta);
+  const Vector3D cosTheta2Vec(cosTheta2);
 
-  double cosTheta = cos_theta(wi);
-  
-  return Vector3D();
+  const Vector3D Rs =
+      (t0 - twoEtaCos + cosTheta2Vec) / (t0 + twoEtaCos + cosTheta2Vec);
+  const Vector3D Rp =
+      (t0 * cosTheta2 - twoEtaCos + Vector3D(1.0)) /
+      (t0 * cosTheta2 + twoEtaCos + Vector3D(1.0));
+
+  return 0.5 * (Rs + Rp);
 }
 
 Vector3D MicrofacetBSDF::f(const Vector3D wo, const Vector3D wi) {
-  // TODO: proj3-2, part 3
-  // Implement microfacet model here.
+  const double cosThetaO = wo.z;
+  const double cosThetaI = wi.z;
+  if (cosThetaO <= 0.0 || cosThetaI <= 0.0) return Vector3D();
 
-  return Vector3D();
+  const Vector3D h = (wo + wi).unit();
+  const double wiDotH = dot(wi, h);
+  if (wiDotH <= 0.0) return Vector3D();
+
+  const double denom = 4.0 * cosThetaO * cosThetaI;
+  return F(wiDotH) * (G(wo, wi) * D(h) / denom);
 }
 
 Vector3D MicrofacetBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf) {
-  // TODO: proj3-2, part 3
-  // *Importance* sample Beckmann normal distribution function (NDF) here.
-  // Note: You should fill in the sampled direction *wi and the corresponding *pdf,
-  //       and return the sampled BRDF value.
+  if (wo.z <= 0.0) {
+    *pdf = 0.0;
+    return Vector3D();
+  }
 
+  const Vector2D u = sampler.get_sample();
+  const double phi = 2.0 * PI * u.y;
+  const double tanTheta2 = -alpha * alpha * log(1.0 - u.x);
+  const double cosTheta = 1.0 / sqrt(1.0 + tanTheta2);
+  const double sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+  const Vector3D h(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
 
+  const double woDotH = dot(wo, h);
+  if (woDotH <= 0.0) {
+    *pdf = 0.0;
+    return Vector3D();
+  }
 
-  *wi = cosineHemisphereSampler.get_sample(pdf);
+  *wi = 2.0 * woDotH * h - wo;
+  if (wi->z <= 0.0) {
+    *pdf = 0.0;
+    return Vector3D();
+  }
+
+  const double D_h = D(h);
+  *pdf = D_h * h.z / (4.0 * woDotH);
 
   return MicrofacetBSDF::f(wo, *wi);
 }
@@ -125,12 +158,14 @@ Vector3D RefractionBSDF::f(const Vector3D wo, const Vector3D wi) {
 }
 
 Vector3D RefractionBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf) {
+  *pdf = 1.0;
+  if (!refract(wo, wi, ior)) {
+    *pdf = 0.0;
+    return Vector3D();
+  }
 
-  // TODO:
-  // Implement RefractionBSDF
-  
-  
-  return Vector3D();
+  const double eta = wo.z > 0.0 ? 1.0 / ior : ior;
+  return transmittance / (abs_cos_theta(*wi) * eta * eta);
 }
 
 void RefractionBSDF::render_debugger_node()
@@ -166,15 +201,35 @@ Vector3D GlassBSDF::f(const Vector3D wo, const Vector3D wi) {
 }
 
 Vector3D GlassBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf) {
+  const double cos_theta_i = abs_cos_theta(wo);
+  const double eta_i = wo.z > 0.0 ? 1.0 : ior;
+  const double eta_t = wo.z > 0.0 ? ior : 1.0;
+  const double eta = eta_i / eta_t;
+  const double sin2_theta_t = eta * eta * sin_theta2(wo);
 
-  // TODO:
-  // Compute Fresnel coefficient and either reflect or refract based on it.
+  if (sin2_theta_t >= 1.0) {
+    reflect(wo, wi);
+    *pdf = 1.0;
+    return reflectance / abs_cos_theta(*wi);
+  }
 
-  // compute Fresnel coefficient and use it as the probability of reflection
-  // - Fundamentals of Computer Graphics page 305
+  const double cos_theta_t = sqrt(1.0 - sin2_theta_t);
+  const double eta_t_cos_i = eta_t * cos_theta_i;
+  const double eta_i_cos_t = eta_i * cos_theta_t;
+  const double rs = (eta_t_cos_i - eta_i_cos_t) / (eta_t_cos_i + eta_i_cos_t);
+  const double rp = (eta_i * cos_theta_i - eta_t * cos_theta_t) /
+                    (eta_i * cos_theta_i + eta_t * cos_theta_t);
+  const double fr = 0.5 * (rs * rs + rp * rp);
 
+  if (coin_flip(fr)) {
+    reflect(wo, wi);
+    *pdf = fr;
+    return reflectance * fr / abs_cos_theta(*wi);
+  }
 
-  return Vector3D();
+  *wi = Vector3D(-eta * wo.x, -eta * wo.y, wo.z > 0.0 ? -cos_theta_t : cos_theta_t);
+  *pdf = 1.0 - fr;
+  return transmittance * (1.0 - fr) / (abs_cos_theta(*wi) * eta * eta);
 }
 
 void GlassBSDF::render_debugger_node()
@@ -207,27 +262,17 @@ void GlassBSDF::apply_preset(const BSDFPreset& preset) {
 }
 
 void BSDF::reflect(const Vector3D wo, Vector3D* wi) {
-
-  // TODO:
-  // Implement reflection of wo about normal (0,0,1) and store result in wi.
-  
-
-
+  *wi = Vector3D(-wo.x, -wo.y, wo.z);
 }
 
 bool BSDF::refract(const Vector3D wo, Vector3D* wi, double ior) {
+  const double eta = wo.z > 0.0 ? 1.0 / ior : ior;
+  const double sin2_theta_t = eta * eta * sin_theta2(wo);
+  if (sin2_theta_t >= 1.0) return false;
 
-  // TODO:
-  // Use Snell's Law to refract wo surface and store result ray in wi.
-  // Return false if refraction does not occur due to total internal reflection
-  // and true otherwise. When dot(wo,n) is positive, then wo corresponds to a
-  // ray entering the surface through vacuum.
-
-
-
-
+  const double cos_theta_t = sqrt(1.0 - sin2_theta_t);
+  *wi = Vector3D(-eta * wo.x, -eta * wo.y, wo.z > 0.0 ? -cos_theta_t : cos_theta_t);
   return true;
-
 }
 
 } // namespace CGL

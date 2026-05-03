@@ -145,6 +145,7 @@ Vector3D PathTracer::zero_bounce_radiance(const Ray &r,
   // Part 3, Task 2
   // Returns the light that results from no bounces of light
 
+  if (isect.bsdf == nullptr) return Vector3D();
   return isect.bsdf->get_emission();
 
 }
@@ -172,53 +173,31 @@ Vector3D PathTracer::at_least_one_bounce_radiance(const Ray &r,
   Vector3D w_out = w2o * (-r.d);
   Vector3D L_out(0, 0, 0);
 
-  // Part 4.2
-  // Returns the one bounce radiance + radiance from extra bounces at this point
-  // Should be called recursively to simulate extra bounces
-
-  if (r.depth == 1) { // base case
-    return one_bounce_radiance(r, isect);
-  }
-  if (isAccumBounces) { // add direct lighting at this hit point
+  if (isAccumBounces || r.depth == 1) {
     L_out += one_bounce_radiance(r, isect);
   }
+  if (r.depth <= 1) return L_out;
 
-    /* for ONLY direct and ONLY indirect
-  if (r.depth == 1) { // base case
-    // indirect only would set this to black
-    if (r.depth == max_ray_depth) {
-        return Vector3D(0, 0, 0); 
-    }
-    return one_bounce_radiance(r, isect);
-  }
-  
-  if (isAccumBounces) { // add direct lighting at this hit point
-    // adds light if it isn't the direct light
-    if (r.depth != max_ray_depth) {
-        L_out += one_bounce_radiance(r, isect);
-    }
-  }
-    */
+  const double survival_probability = 0.7;
+  if (!coin_flip(survival_probability)) return L_out;
 
   Vector3D wi;
-  double pdf;
-  Vector3D f = isect.bsdf->sample_f(w_out, &wi, &pdf); // samples next bounce
+  double pdf = 0.0;
+  Vector3D f = isect.bsdf->sample_f(w_out, &wi, &pdf);
+  if (pdf <= 0.0) return L_out;
 
-  // recursive ray
-  Ray rn = Ray(hit_p, o2w *wi);
+  Ray rn = Ray(hit_p, o2w * wi);
   rn.min_t = EPS_F;
   rn.depth = r.depth - 1;
 
   Intersection isectn;
-  double prr = 0.35; // probability of termination, 0.35
   if (bvh->intersect(rn, &isectn)) {
-    if (isAccumBounces) {
-      if ((max_ray_depth > 1 && r.depth == max_ray_depth) || !coin_flip(prr)) {
-        L_out += at_least_one_bounce_radiance(rn, isectn) * f * dot(o2w * wi, isect.n) / pdf;
-      }
-    } else {
-      return at_least_one_bounce_radiance(rn, isectn) * f * dot(o2w * wi, isect.n) / pdf;
-    }
+    Vector3D incoming = zero_bounce_radiance(rn, isectn);
+    incoming += at_least_one_bounce_radiance(rn, isectn);
+    L_out += f * incoming * abs_cos_theta(wi) / (pdf * survival_probability);
+  } else if (envLight) {
+    Vector3D incoming = envLight->sample_dir(rn);
+    L_out += f * incoming * abs_cos_theta(wi) / (pdf * survival_probability);
   }
 
   return L_out;
@@ -241,26 +220,11 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
   if (!bvh->intersect(r, &isect)) // no hit
     return envLight ? envLight->sample_dir(r) : L_out;
 
-
-  // L_out = (isect.t == INF_D) ? debug_shading(r.d) : normal_shading(isect.n);
-
-  // (Part 3): Return the direct illumination.
-  //Vector3D zero_bounce_component = zero_bounce_radiance(r, isect);
-  //Vector3D one_bounce_component = one_bounce_radiance(r, isect);
-  // return zero_bounce_component + one_bounce_component;
-
-  
-  // Part 4: Accumulate the "direct" and "indirect"
-  // parts of global illumination into L_out rather than just direct
-
-  if (isAccumBounces) { // gather all light
-    // just light from object it hit if == 0, else add at_least_one_bounce_radiance
-    return r.depth == 0 ? zero_bounce_radiance(r, isect) : zero_bounce_radiance(r, isect) + at_least_one_bounce_radiance(r, isect);
-  } else {
-    return r.depth == 0 ? zero_bounce_radiance(r, isect) : at_least_one_bounce_radiance(r, isect); // not accumulate
+  L_out = zero_bounce_radiance(r, isect);
+  if (max_ray_depth > 0) {
+    L_out += at_least_one_bounce_radiance(r, isect);
   }
-
-  // return L_out;
+  return L_out;
 }
 
 void PathTracer::raytrace_pixel(size_t x, size_t y) {
