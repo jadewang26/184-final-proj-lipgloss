@@ -26,67 +26,120 @@ static Vec3 normalize(Vec3 v) {
   if (l < 1e-12) return Vec3(0, 0, 1);
   return Vec3(v.x/l, v.y/l, v.z/l);
 }
-// the parametric lips surface is defined by two functions, one for the upper lip and one for the lower lip.
-// World axes (same convention as the CBspheres examples read by ColladaParser):
-//   +X right, +Y up, +Z toward the camera (pucker direction).
-//
-// Both lips meet along the mouth line y = -0.015 * (1 - u^2).
+static double clamp01(double x) {
+  return std::max(0.0, std::min(1.0, x));
+}
+
+static double mix(double a, double b, double t) {
+  return a + (b - a) * t;
+}
+
+static double gaussian(double x, double sigma) {
+  return std::exp(-(x * x) / (2.0 * sigma * sigma));
+}
+
+static double smootherstep(double x) {
+  x = clamp01(x);
+  return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+}
+
+// The procedural lip surface is built as three patches: upper lip, lower lip,
+// and a narrow recessed mouth crease. World axes match the CS184 Collada
+// scenes: +X right, +Y up, +Z toward the camera.
 
 typedef Vec3 (*LipFunc)(double, double);
 
-// u in [-1, 1] : left corner -> right corner of the mouth
-// v in [ 0, 1] : mouth line  -> top of upper lip
-static Vec3 upper_lip(double u, double v) {
-  const double half_width = 0.80;
-  const double top_height = 0.32;   
-  const double pucker     = 0.20;   
+static double taper(double u) {
+  return std::max(0.0, 1.0 - u * u);
+}
 
-  double s = std::max(0.0, 1.0 - u*u);   // lip-corner taper factor
-  double x = u * half_width;
+static double mouth_line_y(double u) {
+  double s = taper(u);
+  double corner_drop = -0.055 * std::pow(std::abs(u), 4.0);
+  double soft_smile = -0.020 * std::pow(s, 0.85);
+  return soft_smile + corner_drop - 0.008 * u;
+}
 
-  // Top edge (skin border of the upper lip).
-  // Smooth elliptical arch + a sharp Gaussian dip at u=0 -> the Cupid's bow.
-  double arc   = top_height * std::pow(s, 0.55);
-  double cupid = 0.08 * std::exp(-u*u / 0.008);
-  double y_top = arc - cupid;
+static double lip_x(double u) {
+  double corner_pinching = 0.018 * std::sin(2.0 * M_PI * u);
+  return 0.86 * (u + corner_pinching);
+}
 
-  // Bottom edge = the mouth line.  Slight downward curl so the two lips
-  // meet on a gentle smile.
-  double y_bot = -0.015 * s;
-
-  double y = y_bot + v * (y_top - y_bot);
-
-  // Forward pucker: max at the lip centerline (u=0) and mid-height (v=0.5),
-  // zero at the corners and along both edges.
-  double horiz = std::pow(s, 0.45);
-  double vert  = 4.0 * v * (1.0 - v);
-  double z     = pucker * horiz * vert;
-
-  return Vec3(x, y, z);
+static double vertical_folds(double u, double v, double amount) {
+  double s = taper(u);
+  double border_fade = smootherstep(1.0 - v);
+  double envelope = std::pow(s, 0.95) * std::pow(std::sin(M_PI * clamp01(v)), 0.70) * border_fade;
+  double fine = std::sin(21.0 * M_PI * (u + 0.013));
+  double mid = std::sin(13.0 * M_PI * (u - 0.071));
+  double broad = std::sin(7.0 * M_PI * (u + 0.11));
+  double grooves = -0.5 * std::abs(fine) - 0.32 * std::abs(mid) + 0.18 * broad;
+  return amount * envelope * grooves;
 }
 
 // u in [-1, 1] : left corner -> right corner of the mouth
-// v in [ 0, 1] : bottom of lower lip -> mouth line   (chosen so normals face +Z)
+// v in [ 0, 1] : mouth line  -> upper vermilion border
+static Vec3 upper_lip(double u, double v) {
+  double s = taper(u);
+  double side = std::abs(u);
+  double t = smootherstep(v);
+
+  double y_mouth = mouth_line_y(u);
+  double cupid_dip = 0.070 * gaussian(u, 0.120);
+  double bow_peaks = 0.045 * (gaussian(u - 0.28, 0.16) + gaussian(u + 0.28, 0.16));
+  double arch = 0.335 * std::pow(s, 0.62);
+  double y_border = arch + bow_peaks - cupid_dip - 0.055 * std::pow(side, 4.0) - 0.010 * u;
+  double y = mix(y_mouth, y_border, t);
+
+  double roll = std::pow(std::sin(M_PI * clamp01(v)), 0.78);
+  double central_swell = 0.160 * std::pow(s, 0.52) * roll;
+  double bow_indent = -0.035 * gaussian(u, 0.15) * gaussian(v - 0.83, 0.16);
+  double seam_recess = -0.052 * std::pow(s, 0.70) * gaussian(v, 0.10);
+  double border_recess = -0.030 * std::pow(s, 0.85) * gaussian(v - 1.0, 0.18);
+  double corner_recess = -0.060 * std::pow(side, 3.0);
+  double z = central_swell + bow_indent + seam_recess + border_recess + corner_recess;
+
+  // Tiny anatomical asymmetry helps the surface avoid a CG-perfect mirror look.
+  z += 0.010 * std::sin(5.0 * M_PI * (u + 0.08)) * std::pow(s, 1.2) * roll;
+  z += vertical_folds(u, v, 0.006);
+
+  return Vec3(lip_x(u), y, z);
+}
+
+// u in [-1, 1] : left corner -> right corner of the mouth
+// v in [ 0, 1] : mouth line  -> lower vermilion border
 static Vec3 lower_lip(double u, double v) {
-  const double half_width = 0.80;
-  const double bot_height = 0.42;  
-  const double pucker     = 0.26;   
+  double s = taper(u);
+  double side = std::abs(u);
+  double t = smootherstep(v);
 
-  double s = std::max(0.0, 1.0 - u*u);
-  double x = u * half_width;
+  double y_mouth = mouth_line_y(u);
+  double lower_drop = -0.405 * std::pow(s, 0.72) - 0.030 * gaussian(u, 0.34);
+  double y_border = lower_drop - 0.052 * std::pow(side, 4.0) - 0.004 * u;
+  double y = mix(y_mouth, y_border, t);
 
-  // Bottom edge: wide, fuller arc below the mouth line.
-  double y_bot_edge = -bot_height * std::pow(s, 0.75);
-  // Top edge: matches upper_lip's bottom edge exactly so the lips meet.
-  double y_top_edge = -0.015 * s;
+  double roll = std::pow(std::sin(M_PI * clamp01(v)), 0.60);
+  double central_pillow = 0.265 * std::pow(s, 0.43) * roll;
+  double lower_lobe = 0.065 * gaussian(u, 0.42) * gaussian(v - 0.58, 0.22);
+  double seam_recess = -0.064 * std::pow(s, 0.70) * gaussian(v, 0.095);
+  double border_recess = -0.040 * std::pow(s, 0.90) * gaussian(v - 1.0, 0.20);
+  double corner_recess = -0.068 * std::pow(side, 3.0);
+  double z = central_pillow + lower_lobe + seam_recess + border_recess + corner_recess;
 
-  double y = y_bot_edge + v * (y_top_edge - y_bot_edge);
+  z += 0.012 * std::sin(4.0 * M_PI * (u - 0.04)) * std::pow(s, 1.1) * roll;
+  z += vertical_folds(u, v, 0.008);
 
-  double horiz = std::pow(s, 0.40);
-  double vert  = 4.0 * v * (1.0 - v);
-  double z     = pucker * horiz * vert;
+  return Vec3(lip_x(u), y, z);
+}
 
-  return Vec3(x, y, z);
+// A narrow, recessed crease makes the closed mouth read as depth instead of a
+// bent lower-lip patch.
+static Vec3 mouth_crease(double u, double v) {
+  double s = taper(u);
+  double center_shadow = gaussian(u, 0.46);
+  double y = mouth_line_y(u) + (v - 0.5) * 0.026 * std::pow(s, 0.70);
+  double z = -0.042 - 0.072 * std::pow(s, 0.58) - 0.020 * std::pow(std::abs(u), 2.0)
+             - 0.030 * center_shadow;
+  return Vec3(lip_x(u), y, z);
 }
 
 static Vec3 surface_normal(LipFunc f, double u, double v) {
@@ -112,7 +165,8 @@ static void tesselate(LipFunc f,
                       std::vector<Vec3>& verts,
                       std::vector<Vec3>& norms,
                       std::vector<int>&  tris,
-                      int nu, int nv) {
+                      int nu, int nv,
+                      bool flip_winding = false) {
   int base = (int)verts.size();
 
   const double u_min = -0.99, u_max = 0.99;
@@ -133,11 +187,69 @@ static void tesselate(LipFunc f,
       int p01 = base + (i  ) * stride + (j+1);
       int p10 = base + (i+1) * stride + (j  );
       int p11 = base + (i+1) * stride + (j+1);
-      // Two CCW triangles per quad.
-      tris.push_back(p00); tris.push_back(p10); tris.push_back(p01);
-      tris.push_back(p01); tris.push_back(p10); tris.push_back(p11);
+      if (flip_winding) {
+        tris.push_back(p00); tris.push_back(p01); tris.push_back(p10);
+        tris.push_back(p01); tris.push_back(p11); tris.push_back(p10);
+      } else {
+        tris.push_back(p00); tris.push_back(p10); tris.push_back(p01);
+        tris.push_back(p01); tris.push_back(p10); tris.push_back(p11);
+      }
     }
   }
+}
+
+static void write_lip_geometry(std::ofstream& out,
+                               const std::string& id,
+                               const std::string& name,
+                               const std::string& material_id,
+                               const std::vector<Vec3>& verts,
+                               const std::vector<Vec3>& norms,
+                               const std::vector<int>& tris) {
+  out << "    <geometry id=\"" << id << "\" name=\"" << name << "\">\n"
+      << "      <mesh>\n";
+
+  out << "        <source id=\"" << id << "-positions\">\n"
+      << "          <float_array id=\"" << id << "-positions-array\" count=\""
+      << verts.size() * 3 << "\">";
+  for (const Vec3& v : verts) out << " " << v.x << " " << v.y << " " << v.z;
+  out << "</float_array>\n"
+      << "          <technique_common><accessor source=\"#" << id
+      << "-positions-array\" count=\"" << verts.size() << "\" stride=\"3\">\n"
+      << "            <param name=\"X\" type=\"float\"/>"
+         "<param name=\"Y\" type=\"float\"/>"
+         "<param name=\"Z\" type=\"float\"/>\n"
+      << "          </accessor></technique_common>\n"
+      << "        </source>\n";
+
+  out << "        <source id=\"" << id << "-normals\">\n"
+      << "          <float_array id=\"" << id << "-normals-array\" count=\""
+      << norms.size() * 3 << "\">";
+  for (const Vec3& n : norms) out << " " << n.x << " " << n.y << " " << n.z;
+  out << "</float_array>\n"
+      << "          <technique_common><accessor source=\"#" << id
+      << "-normals-array\" count=\"" << norms.size() << "\" stride=\"3\">\n"
+      << "            <param name=\"X\" type=\"float\"/>"
+         "<param name=\"Y\" type=\"float\"/>"
+         "<param name=\"Z\" type=\"float\"/>\n"
+      << "          </accessor></technique_common>\n"
+      << "        </source>\n";
+
+  out << "        <vertices id=\"" << id << "-vertices\">\n"
+      << "          <input semantic=\"POSITION\" source=\"#" << id << "-positions\"/>\n"
+      << "        </vertices>\n";
+
+  out << "        <triangles count=\"" << tris.size() / 3
+      << "\" material=\"" << material_id << "\">\n"
+      << "          <input semantic=\"VERTEX\" source=\"#" << id
+      << "-vertices\" offset=\"0\"/>\n"
+      << "          <input semantic=\"NORMAL\" source=\"#" << id
+      << "-normals\"  offset=\"1\"/>\n"
+      << "          <p>";
+  for (int idx : tris) out << " " << idx << " " << idx;
+  out << "</p>\n"
+      << "        </triangles>\n"
+      << "      </mesh>\n"
+      << "    </geometry>\n";
 }
 
 // the  main 
@@ -148,10 +260,11 @@ int main(int argc, char** argv) {
   std::vector<Vec3> verts, norms;
   std::vector<int>  tris;
 
-  const int NU = 60;   // samples across the width
-  const int NV = 24;   // samples from edge to mouth line
+  const int NU = 96;   // samples across the width
+  const int NV = 36;   // samples from mouth line to vermilion border
   tesselate(upper_lip, verts, norms, tris, NU, NV);
-  tesselate(lower_lip, verts, norms, tris, NU, NV);
+  tesselate(lower_lip, verts, norms, tris, NU, NV, true);
+  tesselate(mouth_crease, verts, norms, tris, NU, 4);
 
   std::ofstream out(outpath);
   if (!out) {
@@ -171,7 +284,7 @@ R"(<?xml version="1.0" encoding="utf-8"?>
   <library_cameras>
     <camera id="Camera-camera" name="Camera">
       <optics><technique_common><perspective>
-        <xfov sid="xfov">40</xfov>
+        <xfov sid="xfov">66</xfov>
         <aspect_ratio>1.333333</aspect_ratio>
         <znear sid="znear">0.1</znear>
         <zfar  sid="zfar">100</zfar>
@@ -203,9 +316,9 @@ R"(<?xml version="1.0" encoding="utf-8"?>
           <phong>
             <emission><color sid="emission">0 0 0 1</color></emission>
             <ambient ><color sid="ambient" >0 0 0 1</color></ambient>
-            <diffuse ><color sid="diffuse" >0.82 0.22 0.26 1</color></diffuse>
-            <specular><color sid="specular">0.1 0.1 0.1 1</color></specular>
-            <shininess><float sid="shininess">1</float></shininess>
+            <diffuse ><color sid="diffuse" >0.58 0.075 0.105 1</color></diffuse>
+            <specular><color sid="specular">0.16 0.13 0.13 1</color></specular>
+            <shininess><float sid="shininess">3</float></shininess>
             <index_of_refraction><float sid="index_of_refraction">1</float></index_of_refraction>
           </phong>
         </technique>
@@ -213,11 +326,61 @@ R"(<?xml version="1.0" encoding="utf-8"?>
       <extra>
         <technique profile="CGL">
           <layered>
-            <roughness>0.05</roughness>
-            <thickness>0.75</thickness>
-            <base_color>0.82 0.22 0.26</base_color>
-            <saturation>1.2</saturation>
-            <ior>1.5</ior>
+            <roughness>0.055</roughness>
+            <thickness>0.50</thickness>
+            <base_color>0.62 0.08 0.12</base_color>
+            <saturation>1.05</saturation>
+            <ior>1.48</ior>
+          </layered>
+        </technique>
+      </extra>
+    </effect>
+    <effect id="glossy-lips-effect">
+      <profile_COMMON>
+        <technique sid="common">
+          <phong>
+            <emission><color sid="emission">0 0 0 1</color></emission>
+            <ambient ><color sid="ambient" >0 0 0 1</color></ambient>
+            <diffuse ><color sid="diffuse" >0.66 0.095 0.135 1</color></diffuse>
+            <specular><color sid="specular">0.28 0.24 0.24 1</color></specular>
+            <shininess><float sid="shininess">7</float></shininess>
+            <index_of_refraction><float sid="index_of_refraction">1</float></index_of_refraction>
+          </phong>
+        </technique>
+      </profile_COMMON>
+      <extra>
+        <technique profile="CGL">
+          <layered>
+            <roughness>0.018</roughness>
+            <thickness>0.82</thickness>
+            <base_color>0.70 0.10 0.15</base_color>
+            <saturation>1.18</saturation>
+            <ior>1.52</ior>
+          </layered>
+        </technique>
+      </extra>
+    </effect>
+    <effect id="matte-lips-effect">
+      <profile_COMMON>
+        <technique sid="common">
+          <phong>
+            <emission><color sid="emission">0 0 0 1</color></emission>
+            <ambient ><color sid="ambient" >0 0 0 1</color></ambient>
+            <diffuse ><color sid="diffuse" >0.46 0.060 0.085 1</color></diffuse>
+            <specular><color sid="specular">0.025 0.018 0.018 1</color></specular>
+            <shininess><float sid="shininess">0.35</float></shininess>
+            <index_of_refraction><float sid="index_of_refraction">1</float></index_of_refraction>
+          </phong>
+        </technique>
+      </profile_COMMON>
+      <extra>
+        <technique profile="CGL">
+          <layered>
+            <roughness>0.65</roughness>
+            <thickness>0.02</thickness>
+            <base_color>0.48 0.065 0.090</base_color>
+            <saturation>0.92</saturation>
+            <ior>1.35</ior>
           </layered>
         </technique>
       </extra>
@@ -227,79 +390,60 @@ R"(<?xml version="1.0" encoding="utf-8"?>
     <material id="lips-material" name="lips_material">
       <instance_effect url="#lips-effect"/>
     </material>
+    <material id="glossy-lips-material" name="glossy_lips_material">
+      <instance_effect url="#glossy-lips-effect"/>
+    </material>
+    <material id="matte-lips-material" name="matte_lips_material">
+      <instance_effect url="#matte-lips-effect"/>
+    </material>
   </library_materials>
   <library_geometries>
-    <geometry id="lips-mesh" name="lips">
-      <mesh>
 )";
 
-  // the positions 
-  out << "        <source id=\"lips-positions\">\n"
-      << "          <float_array id=\"lips-positions-array\" count=\""
-      << verts.size()*3 << "\">";
-  for (auto& v : verts) out << " " << v.x << " " << v.y << " " << v.z;
-  out << "</float_array>\n"
-      << "          <technique_common><accessor source=\"#lips-positions-array\" count=\""
-      << verts.size() << "\" stride=\"3\">\n"
-      << "            <param name=\"X\" type=\"float\"/>"
-         "<param name=\"Y\" type=\"float\"/>"
-         "<param name=\"Z\" type=\"float\"/>\n"
-      << "          </accessor></technique_common>\n"
-      << "        </source>\n";
-
-  // normal lips 
-  out << "        <source id=\"lips-normals\">\n"
-      << "          <float_array id=\"lips-normals-array\" count=\""
-      << norms.size()*3 << "\">";
-  for (auto& n : norms) out << " " << n.x << " " << n.y << " " << n.z;
-  out << "</float_array>\n"
-      << "          <technique_common><accessor source=\"#lips-normals-array\" count=\""
-      << norms.size() << "\" stride=\"3\">\n"
-      << "            <param name=\"X\" type=\"float\"/>"
-         "<param name=\"Y\" type=\"float\"/>"
-         "<param name=\"Z\" type=\"float\"/>\n"
-      << "          </accessor></technique_common>\n"
-      << "        </source>\n";
-
-  // vertices + triangles (normals go on the <triangles> input, not here) 
-  out << "        <vertices id=\"lips-vertices\">\n"
-      << "          <input semantic=\"POSITION\" source=\"#lips-positions\"/>\n"
-      << "        </vertices>\n";
-
-  out << "        <triangles count=\"" << tris.size()/3
-      << "\" material=\"lips-material\">\n"
-      << "          <input semantic=\"VERTEX\" source=\"#lips-vertices\" offset=\"0\"/>\n"
-      << "          <input semantic=\"NORMAL\" source=\"#lips-normals\"  offset=\"1\"/>\n"
-      << "          <p>";
-  // Vertex-index and normal-index happen to coincide (built 1:1 above).
-  for (int idx : tris) out << " " << idx << " " << idx;
-  out << "</p>\n"
-      << "        </triangles>\n";
+  write_lip_geometry(out, "lips-mesh", "lips", "lips-material", verts, norms, tris);
+  write_lip_geometry(out, "glossy-lips-mesh", "glossy_lips",
+                     "glossy-lips-material", verts, norms, tris);
+  write_lip_geometry(out, "matte-lips-mesh", "matte_lips",
+                     "matte-lips-material", verts, norms, tris);
 
   //  scene graph 
   out <<
-R"(      </mesh>
-    </geometry>
-  </library_geometries>
+R"(  </library_geometries>
   <library_visual_scenes>
     <visual_scene id="Scene" name="Scene">
       <node id="Camera" name="Camera" type="NODE">
-        <matrix sid="transform">1 0 0 0  0 1 0 -0.05  0 0 1 2.2  0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0  0 1 0 -0.04  0 0 1 3.2  0 0 0 1</matrix>
         <instance_camera url="#Camera-camera"/>
       </node>
       <node id="KeyLight" name="KeyLight" type="NODE">
-        <matrix sid="transform">1 0 0 1.2  0 1 0 1.3  0 0 1 2.0  0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0.8  0 1 0 1.5  0 0 1 2.4  0 0 0 1</matrix>
         <instance_light url="#KeyLight-light"/>
       </node>
       <node id="FillLight" name="FillLight" type="NODE">
-        <matrix sid="transform">1 0 0 -1.5  0 1 0 0.3  0 0 1 1.8  0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 -2.0  0 1 0 0.3  0 0 1 2.2  0 0 0 1</matrix>
         <instance_light url="#FillLight-light"/>
       </node>
       <node id="Lips" name="Lips" type="NODE">
-        <matrix sid="transform">1 0 0 0  0 1 0 0  0 0 1 0  0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 -1.75  0 1 0 0  0 0 1 0  0 0 0 1</matrix>
         <instance_geometry url="#lips-mesh">
           <bind_material><technique_common>
             <instance_material symbol="lips-material" target="#lips-material"/>
+          </technique_common></bind_material>
+        </instance_geometry>
+      </node>
+      <node id="GlossyLips" name="GlossyLips" type="NODE">
+        <matrix sid="transform">1 0 0 0  0 1 0 0  0 0 1 0  0 0 0 1</matrix>
+        <instance_geometry url="#glossy-lips-mesh">
+          <bind_material><technique_common>
+            <instance_material symbol="glossy-lips-material" target="#glossy-lips-material"/>
+          </technique_common></bind_material>
+        </instance_geometry>
+      </node>
+      <node id="MatteLips" name="MatteLips" type="NODE">
+        <matrix sid="transform">1 0 0 1.75  0 1 0 0  0 0 1 0  0 0 0 1</matrix>
+        <instance_geometry url="#matte-lips-mesh">
+          <bind_material><technique_common>
+            <instance_material symbol="matte-lips-material" target="#matte-lips-material"/>
           </technique_common></bind_material>
         </instance_geometry>
       </node>
@@ -311,7 +455,7 @@ R"(      </mesh>
 
   out.close();
   std::cout << "Wrote " << outpath << ": "
-            << verts.size() << " verts, "
-            << tris.size()/3 << " triangles\n";
+            << verts.size() * 3 << " verts across 3 lip meshes, "
+            << (tris.size()/3) * 3 << " triangles\n";
   return 0;
 }

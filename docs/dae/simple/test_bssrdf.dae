@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2024-04-17</created>
+    <modified>2024-04-17</modified>
+    <unit name="meter" meter="1"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  
+  <library_cameras>
+    <camera id="Camera-camera" name="Camera">
+      <optics>
+        <technique_common>
+          <perspective>
+            <xfov>49.13434</xfov>
+            <aspect_ratio>1.777778</aspect_ratio>
+            <znear>0.1</znear>
+            <zfar>100</zfar>
+          </perspective>
+        </technique_common>
+      </optics>
+    </camera>
+  </library_cameras>
+  
+  <library_lights>
+    <light id="Light-light" name="Light">
+      <technique_common>
+        <point>
+          <color>1 1 1</color>
+          <constant_attenuation>1</constant_attenuation>
+          <linear_attenuation>0</linear_attenuation>
+          <quadratic_attenuation>0.00111</quadratic_attenuation>
+        </point>
+      </technique_common>
+    </light>
+  </library_lights>
+  
+  <library_effects>
+    <effect id="bssrdf-effect">
+      <profile_CGL>
+        <technique sid="CGL">
+          <approximate_bssrdf>
+            <skin_color>0.8 0.5 0.4</skin_color>
+            <roughness>0.3</roughness>
+          </approximate_bssrdf>
+        </technique>
+      </profile_CGL>
+    </effect>
+  </library_effects>
+  
+  <library_materials>
+    <material id="bssrdf-material" name="bssrdf_material">
+      <instance_effect url="#bssrdf-effect"/>
+    </material>
+  </library_materials>
+  
+  <library_geometries>
+    <geometry id="Sphere-mesh" name="Sphere">
+      <mesh>
+        <source id="Sphere-mesh-positions">
+          <float_array id="Sphere-mesh-positions-array" count="24">
+            1 0 0
+            0 1 0
+            -1 0 0
+            0 -1 0
+            0 0 1
+            0 0 -1
+            0.7071 0.7071 0
+            0.7071 0 0.7071
+            0.7071 -0.7071 0
+            0.7071 0 -0.7071
+            -0.7071 0.7071 0
+            -0.7071 0 0.7071
+            -0.7071 -0.7071 0
+            -0.7071 0 -0.7071
+            0 0.7071 0.7071
+            0 0.7071 -0.7071
+            0 -0.7071 0.7071
+            0 -0.7071 -0.7071
+            0.5773 0.5773 0.5773
+            0.5773 0.5773 -0.5773
+            0.5773 -0.5773 0.5773
+            0.5773 -0.5773 -0.5773
+            -0.5773 0.5773 0.5773
+            -0.5773 -0.5773 -0.5773
+          </float_array>
+          <technique_common>
+            <accessor source="#Sphere-mesh-positions-array" count="24" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="Sphere-mesh-vertices">
+          <input semantic="POSITION" source="#Sphere-mesh-positions"/>
+        </vertices>
+        <triangles count="8" material="bssrdf-material">
+          <input semantic="VERTEX" source="#Sphere-mesh-vertices" offset="0"/>
+          <p>0 4 7 0 7 9 0 9 5 0 5 1 1 4 14 1 14 15 1 15 19 1 19 6</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="Camera_Orientation" name="Camera_Orientation" type="NODE">
+        <translate>0 0 0</translate>
+        <instance_camera url="#Camera-camera"/>
+      </node>
+      <node id="Light" name="Light" type="NODE">
+        <translate>4 4 5</translate>
+        <instance_light url="#Light-light"/>
+      </node>
+      <node id="Sphere" name="Sphere" type="NODE">
+        <translate>0 0 0</translate>
+        <instance_geometry url="#Sphere-mesh">
+          <bind_material>
+            <technique_common>
+              <instance_material symbol="bssrdf-material" target="#bssrdf-material"/>
+            </technique_common>
+          </bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

@@ -33,6 +33,7 @@ void usage(const char *binaryName) {
   printf("  -e  <PATH>       Path to environment map\n");
   printf("  -b  <FLOAT>      The size of the aperture\n");
   printf("  -d  <FLOAT>      The focal distance\n");
+  printf("  -v  <VARIANT>    Lip variant to render: default, glossy, matte, or all\n");
   printf("  -f  <FILENAME>   Image (.png) file to save output to in windowless "
          "mode\n");
   printf(
@@ -78,6 +79,42 @@ HDRImageBuffer *load_exr(const char *file_path) {
   return envmap;
 }
 
+bool is_lip_variant_node(const Collada::Node& node) {
+  return node.id == "Lips" || node.id == "GlossyLips" || node.id == "MatteLips";
+}
+
+bool node_matches_lip_variant(const Collada::Node& node, const string& variant) {
+  if (variant == "default") return node.id == "Lips";
+  if (variant == "glossy") return node.id == "GlossyLips";
+  if (variant == "matte") return node.id == "MatteLips";
+  return false;
+}
+
+bool filter_lip_variant(Collada::SceneInfo *sceneInfo, const string& variant) {
+  if (!sceneInfo || variant == "all") return true;
+  if (variant != "default" && variant != "glossy" && variant != "matte") {
+    return false;
+  }
+
+  vector<Collada::Node> filtered_nodes;
+  bool found_variant = false;
+  for (Collada::Node node : sceneInfo->nodes) {
+    if (!is_lip_variant_node(node)) {
+      filtered_nodes.push_back(node);
+      continue;
+    }
+
+    if (node_matches_lip_variant(node, variant)) {
+      node.transform(0, 3) = 0.0;
+      filtered_nodes.push_back(node);
+      found_variant = true;
+    }
+  }
+
+  sceneInfo->nodes = filtered_nodes;
+  return found_variant;
+}
+
 int main(int argc, char **argv) {
 
   // get the options
@@ -87,6 +124,7 @@ int main(int argc, char **argv) {
   size_t w = 0, h = 0, x = -1, y = 0, dx = 0, dy = 0;
   string output_file_name, cam_settings = "";
   string sceneFilePath;
+  string lip_variant = "default";
   if (argc == 1) { // no argument specifiers, launch GUI to get the settings
 #define SETTINGSFILE_PATH "settings.txt"
     PathtracerLauncherGUI::GUISettings settings;
@@ -123,7 +161,7 @@ int main(int argc, char **argv) {
       config.pathtracer_accumulate_bounces = settings.pathtracer_accumulate_bounces;
     }
   } else {
-    while ((opt = getopt(argc, argv, "s:l:t:m:o:e:h:H:f:r:c:b:d:a:p:")) !=
+    while ((opt = getopt(argc, argv, "s:l:t:m:o:e:h:H:f:r:c:b:d:a:p:v:")) !=
            -1) { // for each option...
       switch (opt) {
       case 'f':
@@ -171,6 +209,9 @@ int main(int argc, char **argv) {
       case 'd':
         config.pathtracer_focalDistance = atof(optarg);
         break;
+      case 'v':
+        lip_variant = string(optarg);
+        break;
       case 'a':
         config.pathtracer_samples_per_patch = atoi(argv[optind - 1]);
         config.pathtracer_max_tolerance = atof(argv[optind]);
@@ -205,6 +246,13 @@ int main(int argc, char **argv) {
     delete sceneInfo;
     exit(0);
   }
+  if (!filter_lip_variant(sceneInfo, lip_variant)) {
+    msg("Unknown or missing lip variant '" << lip_variant
+        << "'. Use default, glossy, matte, or all.");
+    delete sceneInfo;
+    return 1;
+  }
+  msg("Lip variant: " << lip_variant);
   PathtracerLauncherGUI::apply_material_overrides(sceneInfo);
 
   // create application
