@@ -2,6 +2,7 @@
 #define CGL_STATICSCENE_BSDF_H
 
 #include "CGL/CGL.h"
+#include "CGL/vector2D.h"
 #include "CGL/vector3D.h"
 #include "CGL/matrix3x3.h"
 
@@ -58,6 +59,8 @@ enum BSDFPresetType {
   BSDF_PRESET_GLASS,
   BSDF_PRESET_EMISSION,
   BSDF_PRESET_APPROXIMATE_BSSRDF,
+  BSDF_PRESET_RANDOM_WALK_SSS,
+  BSDF_PRESET_RANDOM_WALK_LAYERED,
   BSDF_PRESET_LAYERED,
   BSDF_PRESET_FAST_LAYERED,
   BSDF_PRESET_DISNEY_LAYERED,
@@ -69,21 +72,25 @@ struct BSDFPreset {
   std::string material_name;
   Vector3D vector_a;
   Vector3D vector_b;
+  Vector3D vector_c;
   double scalar_a;
   double scalar_b;
   double scalar_c;
   double scalar_d;
   double scalar_e;
+  double scalar_f;
 
   BSDFPreset()
       : type(BSDF_PRESET_UNKNOWN),
         vector_a(),
         vector_b(),
+        vector_c(),
         scalar_a(0.0),
         scalar_b(0.0),
         scalar_c(0.0),
         scalar_d(0.0),
-        scalar_e(0.0) {}
+        scalar_e(0.0),
+        scalar_f(0.0) {}
 };
 
 class BSDF;
@@ -114,6 +121,10 @@ class BSDF {
    * \return reflectance in the given incident/outgoing directions
    */
   virtual Vector3D f (const Vector3D wo, const Vector3D wi) = 0;
+  virtual Vector3D f (const Vector3D wo, const Vector3D wi,
+                      const Vector2D uv) {
+    return f(wo, wi);
+  }
 
   /**
    * Evaluate BSDF.
@@ -127,6 +138,10 @@ class BSDF {
    * \return reflectance in the output incident and given outgoing directions
    */
   virtual Vector3D sample_f (const Vector3D wo, Vector3D* wi, double* pdf) = 0;
+  virtual Vector3D sample_f (const Vector3D wo, Vector3D* wi, double* pdf,
+                             const Vector2D uv) {
+    return sample_f(wo, wi, pdf);
+  }
 
   /**
    * Get the emission value of the surface material. For non-emitting surfaces
@@ -380,6 +395,66 @@ class ApproximateBSSRDF : public BSDF {
 }; // class ApproximateBSSRDF
 
 /**
+ * Random-walk subsurface material.
+ *
+ * The path integrator treats this BSDF specially for supported closed primitives:
+ * camera/light paths enter the medium, perform volumetric random walks using
+ * sigma_a/sigma_s, and re-emerge from another surface point. The local f() and
+ * sample_f() methods are a diffuse fallback for unsupported geometry.
+ */
+class RandomWalkSSSBSDF : public BSDF {
+ public:
+
+  RandomWalkSSSBSDF(const Vector3D sigma_a, const Vector3D sigma_s,
+                   double anisotropy_g = 0.0, double ior = 1.3,
+                   double scale = 5.0, double surface_roughness = 0.55,
+                   double specular_weight = 0.3,
+                   BSDFPresetType preset_type = BSDF_PRESET_RANDOM_WALK_SSS,
+                   const Vector3D base_color = Vector3D(1.0),
+                   double saturation = 1.0)
+    : sigma_a(sigma_a), sigma_s(sigma_s), anisotropy_g(anisotropy_g),
+      ior(ior), scale(scale), surface_roughness(surface_roughness),
+      specular_weight(specular_weight), preset_type(preset_type),
+      base_color(base_color), saturation(saturation) { }
+
+  Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D get_emission() const { return Vector3D(); }
+  bool is_delta() const { return false; }
+
+  void render_debugger_node();
+  BSDFPreset get_preset() const;
+  void apply_preset(const BSDFPreset& preset);
+
+  Vector3D get_sigma_a() const { return sigma_a; }
+  Vector3D get_sigma_s() const { return sigma_s; }
+  double get_anisotropy_g() const { return anisotropy_g; }
+  double get_ior() const { return ior; }
+  double get_scale() const { return scale; }
+  double get_surface_roughness() const { return surface_roughness; }
+  double get_specular_weight() const { return specular_weight; }
+  BSDFPresetType get_preset_type() const { return preset_type; }
+  Vector3D get_base_color() const { return base_color; }
+  double get_saturation() const { return saturation; }
+  Vector3D diffuse_fallback_color() const;
+
+ private:
+
+  Vector3D sigma_a;
+  Vector3D sigma_s;
+  double anisotropy_g;
+  double ior;
+  double scale;
+  double surface_roughness;
+  double specular_weight;
+  BSDFPresetType preset_type;
+  Vector3D base_color;
+  double saturation;
+  CosineWeightedHemisphereSampler3D sampler;
+
+}; // class RandomWalkSSSBSDF
+
+/**
  * Layered BSDF.
  * Combines a base BSSRDF layer (e.g., skin) with a glossy specular layer (e.g., gloss/lipstick).
  * The thickness parameter controls the blend between base and gloss layers.
@@ -396,10 +471,12 @@ class LayeredBSDF : public BSDF {
    * \param ior Index of refraction for the gloss layer (default 1.5)
    */
   LayeredBSDF(double roughness, double thickness, const Vector3D base_color,
-              double saturation, double ior = 1.5)
+              double saturation, double ior = 1.5,
+              double pooling_strength = 0.0)
     : roughness(roughness), thickness(thickness), base_color(base_color),
       saturation(saturation), ior(ior),
       subsurface_color(base_color), subsurface_roughness(roughness),
+      pooling_strength(pooling_strength),
       base_layer(new ApproximateBSSRDF(subsurface_color, subsurface_roughness)) { }
 
   ~LayeredBSDF() {
@@ -407,7 +484,10 @@ class LayeredBSDF : public BSDF {
   }
 
   Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D f(const Vector3D wo, const Vector3D wi, const Vector2D uv);
   Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf,
+                    const Vector2D uv);
   Vector3D get_emission() const { return Vector3D(); }
   bool is_delta() const { return false; }
 
@@ -424,6 +504,7 @@ class LayeredBSDF : public BSDF {
   double ior;
   Vector3D subsurface_color;
   double subsurface_roughness;
+  double pooling_strength;
   ApproximateBSSRDF* base_layer;
   CosineWeightedHemisphereSampler3D sampler;
 
@@ -443,10 +524,12 @@ class FastLayeredBSDF : public BSDF {
    * \param ior Index of refraction for the gloss layer (default 1.5)
    */
   FastLayeredBSDF(double roughness, double thickness, const Vector3D base_color,
-              double saturation, double ior = 1.5)
+              double saturation, double ior = 1.5,
+              double pooling_strength = 0.0)
     : roughness(roughness), thickness(thickness), base_color(base_color),
       saturation(saturation), ior(ior),
       subsurface_color(base_color), subsurface_roughness(roughness),
+      pooling_strength(pooling_strength),
       base_layer(new ApproximateBSSRDF(subsurface_color, subsurface_roughness)) { }
 
   ~FastLayeredBSDF() {
@@ -454,7 +537,10 @@ class FastLayeredBSDF : public BSDF {
   }
 
   Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D f(const Vector3D wo, const Vector3D wi, const Vector2D uv);
   Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf,
+                    const Vector2D uv);
   Vector3D get_emission() const { return Vector3D(); }
   bool is_delta() const { return false; }
 
@@ -471,6 +557,7 @@ class FastLayeredBSDF : public BSDF {
   double ior;
   Vector3D subsurface_color;
   double subsurface_roughness;
+  double pooling_strength;
   ApproximateBSSRDF* base_layer;
   CosineWeightedHemisphereSampler3D sampler;
 
@@ -491,10 +578,12 @@ class DisneyLayeredBSDF : public BSDF {
    * \param ior Index of refraction for the gloss layer (default 1.5)
    */
   DisneyLayeredBSDF(double roughness, double thickness, const Vector3D base_color,
-              double saturation, double ior = 1.5)
+              double saturation, double ior = 1.5,
+              double pooling_strength = 0.0)
     : roughness(roughness), thickness(thickness), base_color(base_color),
       saturation(saturation), ior(ior),
       subsurface_color(base_color), subsurface_roughness(roughness),
+      pooling_strength(pooling_strength),
       base_layer(new ApproximateBSSRDF(subsurface_color, subsurface_roughness)) { }
 
   ~DisneyLayeredBSDF() {
@@ -502,7 +591,10 @@ class DisneyLayeredBSDF : public BSDF {
   }
 
   Vector3D f(const Vector3D wo, const Vector3D wi);
+  Vector3D f(const Vector3D wo, const Vector3D wi, const Vector2D uv);
   Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf);
+  Vector3D sample_f(const Vector3D wo, Vector3D* wi, double* pdf,
+                    const Vector2D uv);
   Vector3D get_emission() const { return Vector3D(); }
   bool is_delta() const { return false; }
 
@@ -519,6 +611,7 @@ class DisneyLayeredBSDF : public BSDF {
   double ior;
   Vector3D subsurface_color;
   double subsurface_roughness;
+  double pooling_strength;
   ApproximateBSSRDF* base_layer;
   CosineWeightedHemisphereSampler3D sampler;
 

@@ -54,6 +54,9 @@ namespace CGL {
         Vector3D zero_bounce_radiance(const Ray& r, const SceneObjects::Intersection& isect);
         Vector3D one_bounce_radiance(const Ray& r, const SceneObjects::Intersection& isect);
         Vector3D at_least_one_bounce_radiance(const Ray& r, const SceneObjects::Intersection& isect);
+        Vector3D random_walk_subsurface_radiance(const Ray& r,
+            const SceneObjects::Intersection& isect,
+            const RandomWalkSSSBSDF* bsdf);
         
         Vector3D debug_shading(const Vector3D d) {
             return Vector3D(abs(d.r), abs(d.g), .0).unit();

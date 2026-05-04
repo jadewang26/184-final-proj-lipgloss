@@ -7,6 +7,7 @@ namespace CGL {
 namespace SceneObjects {
 
 Triangle::Triangle(const Mesh *mesh, size_t v1, size_t v2, size_t v3) {
+  this->mesh = mesh;
   p1 = mesh->positions[v1];
   p2 = mesh->positions[v2];
   p3 = mesh->positions[v3];
@@ -15,6 +16,9 @@ Triangle::Triangle(const Mesh *mesh, size_t v1, size_t v2, size_t v3) {
   n1 = mesh->normals[v1];
   n2 = mesh->normals[v2];
   n3 = mesh->normals[v3];
+  uv1 = mesh->texcoords[v1];
+  uv2 = mesh->texcoords[v2];
+  uv3 = mesh->texcoords[v3];
   bbox = BBox(p1);
   bbox.expand(p2);
   bbox.expand(p3);
@@ -90,10 +94,13 @@ bool Triangle::intersect(const Ray &r, Intersection *isect) const {
   const double t = t_num * inv_denom;
   const double b_1 = b_1_num * inv_denom;
   const double b_2 = b_2_num * inv_denom;
+  const double b_0 = 1.0 - b_1 - b_2;
   const Vector3D n = ((1.0 - b_1 - b_2) * n1 + b_1 * n2 + b_2 * n3).unit();
 
   isect->t = t;
   isect->n = n;
+  isect->uv = b_0 * uv1 + b_1 * uv2 + b_2 * uv3;
+  isect->has_uv = true;
   isect->primitive = this;
   isect->bsdf = this->get_bsdf();
   

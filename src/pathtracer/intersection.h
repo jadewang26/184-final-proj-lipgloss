@@ -3,6 +3,7 @@
 
 #include <vector>
 
+#include "CGL/vector2D.h"
 #include "CGL/vector3D.h"
 #include "CGL/misc.h"
 
@@ -20,7 +21,8 @@ class Primitive;
  */
 struct Intersection {
 
-  Intersection() : t (INF_D), primitive(NULL), bsdf(NULL) { }
+  Intersection() : t (INF_D), primitive(NULL), bsdf(NULL),
+                   uv(), has_uv(false) { }
 
   double t;    ///< time of intersection
 
@@ -30,7 +32,8 @@ struct Intersection {
 
   BSDF* bsdf; ///< BSDF of the surface at point of intersection
 
-  // More to follow.
+  Vector2D uv; ///< interpolated texture coordinates, if available
+  bool has_uv;
 };
 
 } // namespace SceneObjects

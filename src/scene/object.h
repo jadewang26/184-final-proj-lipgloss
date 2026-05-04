@@ -1,6 +1,7 @@
 #ifndef CGL_STATICSCENE_OBJECT_H
 #define CGL_STATICSCENE_OBJECT_H
 
+#include "CGL/vector2D.h"
 #include "util/halfEdgeMesh.h"
 #include "scene.h"
 
@@ -35,6 +36,7 @@ class Mesh : public SceneObject {
 
   Vector3D *positions;  ///< position array
   Vector3D *normals;    ///< normal array
+  Vector2D *texcoords;  ///< texture coordinate array
 
  private:
 

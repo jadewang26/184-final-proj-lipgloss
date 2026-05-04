@@ -23,6 +23,8 @@ const BSDFPresetType kEditableBSDFPresetTypes[] = {
     BSDF_PRESET_GLASS,
     BSDF_PRESET_EMISSION,
     BSDF_PRESET_APPROXIMATE_BSSRDF,
+    BSDF_PRESET_RANDOM_WALK_SSS,
+    BSDF_PRESET_RANDOM_WALK_LAYERED,
     BSDF_PRESET_LAYERED,
     BSDF_PRESET_FAST_LAYERED,
     BSDF_PRESET_DISNEY_LAYERED,
@@ -42,6 +44,89 @@ Vector3D default_surface_color() {
   return Vector3D(0.8, 0.8, 0.8);
 }
 
+Vector3D clamp_vector_min(const Vector3D& value, double min_value) {
+  return Vector3D(max(value.x, min_value),
+                  max(value.y, min_value),
+                  max(value.z, min_value));
+}
+
+Vector3D clamp_color01(const Vector3D& value) {
+  return Vector3D(clamp(value.x, 0.0, 1.0),
+                  clamp(value.y, 0.0, 1.0),
+                  clamp(value.z, 0.0, 1.0));
+}
+
+Vector3D sigma_albedo(const Vector3D& sigma_a, const Vector3D& sigma_s) {
+  Vector3D absorption = clamp_vector_min(sigma_a, 0.0);
+  Vector3D scattering = clamp_vector_min(sigma_s, 0.0);
+  Vector3D sigma_t = absorption + scattering + Vector3D(1e-8);
+  return clamp_color01(scattering / sigma_t);
+}
+
+Vector3D saturated_base_tint(const Vector3D& base_color, double saturation) {
+  return clamp_color01(clamp_vector_min(base_color, 0.0) *
+                       clamp(saturation, 0.0, 1.5));
+}
+
+double smoothstep(double edge0, double edge1, double x) {
+  double t = clamp((x - edge0) / max(edge1 - edge0, 1e-8), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+
+double gaussian(double x, double width) {
+  return exp(-(x * x) / max(width * width, 1e-8));
+}
+
+double radial_lip_wrinkle_u(double u, double local_v, bool upper) {
+  double s = max(0.0, 1.0 - u * u);
+  double corner = smoothstep(0.20, 0.92, fabs(u));
+  double outward_v = upper ? local_v : 1.0 - local_v;
+  double signed_side = tanh(4.0 * u);
+  double shear = (0.012 + 0.120 * corner) * outward_v;
+  double bow = sin(PI * outward_v) * sin(PI * u) * pow(s, 0.30);
+  double curve = -signed_side * shear + (upper ? -0.020 : 0.018) * bow;
+  return u + curve;
+}
+
+double lip_pooling_factor(const Vector2D& uv) {
+  double u = 2.0 * clamp(uv.x, 0.0, 1.0) - 1.0;
+  double v = clamp(uv.y, 0.0, 1.0);
+  bool upper = v >= 0.5;
+  double local_v = upper ? 2.0 * (v - 0.5) : 2.0 * v;
+  double s = max(0.0, 1.0 - u * u);
+  double edge_fade = 1.0 - smoothstep(0.72, 1.0, fabs(u));
+
+  double center = gaussian(u, 0.42);
+  double lower_wet_band = center * gaussian(v - 0.30, 0.13);
+  double mouth_crease = (0.65 + 0.35 * center) * gaussian(v - 0.50, 0.045);
+  double cupid_pool = gaussian(u, 0.16) * gaussian(v - 0.72, 0.10);
+
+  double curved_u = radial_lip_wrinkle_u(u, local_v, upper);
+  double curved_x = 0.5 * (curved_u + 1.0);
+  double wave = 0.5 + 0.5 * cos(24.0 * PI * curved_x +
+                                 0.55 * sin(9.0 * PI * curved_x));
+  double corner_relief = 1.0 - 0.45 * smoothstep(0.55, 0.98, fabs(u));
+  double wrinkle_valleys = pow(wave, 7.0) * gaussian(v - 0.43, 0.34) *
+                           edge_fade * corner_relief;
+
+  return clamp(0.45 * lower_wet_band + 0.35 * mouth_crease +
+               0.25 * wrinkle_valleys + 0.12 * cupid_pool,
+               0.0, 1.0);
+}
+
+void pooled_layer_params(const Vector2D& uv, double pooling_strength,
+                         double base_roughness, double base_thickness,
+                         double base_saturation, double* roughness_out,
+                         double* thickness_out, double* saturation_out) {
+  double p = clamp(pooling_strength, 0.0, 1.0) * lip_pooling_factor(uv);
+  double wet_roughness = max(0.025, base_roughness * 0.35);
+  *roughness_out = clamp(base_roughness * (1.0 - p) + wet_roughness * p,
+                         0.02, 1.0);
+  *thickness_out = clamp(base_thickness + (1.0 - base_thickness) * 0.75 * p,
+                         0.0, 1.0);
+  *saturation_out = clamp(base_saturation + 0.15 * p, 0.0, 1.5);
+}
+
 Vector3D infer_surface_color(const BSDFPreset& preset) {
   switch (preset.type) {
     case BSDF_PRESET_DIFFUSE:
@@ -53,6 +138,14 @@ Vector3D infer_surface_color(const BSDFPreset& preset) {
     case BSDF_PRESET_DISNEY_LAYERED:
     case BSDF_PRESET_REFRACTION:
       return preset.vector_a;
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+      return !is_zero_vector(preset.vector_c)
+          ? preset.vector_c
+          : sigma_albedo(preset.vector_a, preset.vector_b);
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      return !is_zero_vector(preset.vector_c)
+          ? preset.vector_c
+          : sigma_albedo(preset.vector_a, preset.vector_b);
     case BSDF_PRESET_GLASS:
       return !is_zero_vector(preset.vector_b) ? preset.vector_b : preset.vector_a;
     case BSDF_PRESET_MICROFACET:
@@ -72,6 +165,14 @@ Vector3D infer_subsurface_color(const BSDFPreset& preset) {
   if (preset.type == BSDF_PRESET_APPROXIMATE_BSSRDF) {
     return preset.vector_a;
   }
+  if (preset.type == BSDF_PRESET_RANDOM_WALK_LAYERED &&
+      !is_zero_vector(preset.vector_c)) {
+    return preset.vector_c;
+  }
+  if (preset.type == BSDF_PRESET_RANDOM_WALK_SSS ||
+      preset.type == BSDF_PRESET_RANDOM_WALK_LAYERED) {
+    return sigma_albedo(preset.vector_a, preset.vector_b);
+  }
   return infer_surface_color(preset);
 }
 
@@ -85,6 +186,9 @@ double infer_roughness(const BSDFPreset& preset) {
     case BSDF_PRESET_FAST_LAYERED:
     case BSDF_PRESET_DISNEY_LAYERED:
       return preset.scalar_a;
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      return preset.scalar_d;
     default:
       return 0.2;
   }
@@ -104,6 +208,9 @@ double infer_ior(const BSDFPreset& preset) {
     case BSDF_PRESET_REFRACTION:
     case BSDF_PRESET_GLASS:
       return preset.scalar_b;
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      return preset.scalar_b;
     case BSDF_PRESET_LAYERED:
     case BSDF_PRESET_FAST_LAYERED:
     case BSDF_PRESET_DISNEY_LAYERED:
@@ -113,8 +220,26 @@ double infer_ior(const BSDFPreset& preset) {
   }
 }
 
+bool preset_carries_ior(const BSDFPreset& preset) {
+  switch (preset.type) {
+    case BSDF_PRESET_REFRACTION:
+    case BSDF_PRESET_GLASS:
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+    case BSDF_PRESET_LAYERED:
+    case BSDF_PRESET_FAST_LAYERED:
+    case BSDF_PRESET_DISNEY_LAYERED:
+      return true;
+    default:
+      return false;
+  }
+}
+
 double infer_thickness(const BSDFPreset& preset) {
   switch (preset.type) {
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      return preset.scalar_e;
     case BSDF_PRESET_LAYERED:
     case BSDF_PRESET_FAST_LAYERED:
     case BSDF_PRESET_DISNEY_LAYERED:
@@ -126,6 +251,8 @@ double infer_thickness(const BSDFPreset& preset) {
 
 double infer_saturation(const BSDFPreset& preset) {
   switch (preset.type) {
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      return preset.scalar_f;
     case BSDF_PRESET_LAYERED:
     case BSDF_PRESET_FAST_LAYERED:
     case BSDF_PRESET_DISNEY_LAYERED:
@@ -358,6 +485,28 @@ BSDFPreset make_default_bsdf_preset(BSDFPresetType type) {
       preset.vector_a = Vector3D(0.8, 0.6, 0.6);
       preset.scalar_a = 0.3;
       break;
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+      preset.vector_a = Vector3D(0.013, 0.070, 0.145);
+      preset.vector_b = Vector3D(1.09, 1.59, 1.79);
+      preset.vector_c = Vector3D(1.0);
+      preset.scalar_a = 0.0;
+      preset.scalar_b = 1.3;
+      preset.scalar_c = 5.0;
+      preset.scalar_d = 0.55;
+      preset.scalar_e = 0.3;
+      preset.scalar_f = 1.0;
+      break;
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      preset.vector_a = Vector3D(0.013, 0.070, 0.145);
+      preset.vector_b = Vector3D(1.09, 1.59, 1.79);
+      preset.vector_c = Vector3D(0.8, 0.2, 0.2);
+      preset.scalar_a = 0.0;
+      preset.scalar_b = 1.3;
+      preset.scalar_c = 5.0;
+      preset.scalar_d = 0.15;
+      preset.scalar_e = 0.5;
+      preset.scalar_f = 1.0;
+      break;
     case BSDF_PRESET_LAYERED:
     case BSDF_PRESET_FAST_LAYERED:
     case BSDF_PRESET_DISNEY_LAYERED:
@@ -368,6 +517,7 @@ BSDFPreset make_default_bsdf_preset(BSDFPresetType type) {
       preset.scalar_c = 1.0;
       preset.scalar_d = 1.5;
       preset.scalar_e = 0.3;
+      preset.scalar_f = 0.0;
       break;
     default:
       break;
@@ -414,6 +564,62 @@ BSDFPreset convert_bsdf_preset_type(const BSDFPreset& source,
       converted.vector_a = subsurface_color;
       converted.scalar_a = subsurface_roughness;
       break;
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+      // Keep the physically meaningful PBRT skin coefficients instead of
+      // deriving medium parameters from the previous material's display color.
+      converted.vector_c = surface_color;
+      converted.scalar_d = roughness;
+      converted.scalar_e = thickness;
+      converted.scalar_f = saturation;
+      if (preset_carries_ior(source)) {
+        converted.scalar_b = ior;
+      }
+      if (source.type == BSDF_PRESET_RANDOM_WALK_SSS ||
+          source.type == BSDF_PRESET_RANDOM_WALK_LAYERED) {
+        converted.vector_a = source.vector_a;
+        converted.vector_b = source.vector_b;
+        converted.scalar_a = source.scalar_a;
+        converted.scalar_c = source.scalar_c;
+        converted.scalar_d = source.scalar_d;
+        converted.scalar_e = source.scalar_e;
+        converted.vector_c = !is_zero_vector(source.vector_c)
+            ? source.vector_c
+            : surface_color;
+        converted.scalar_f = source.scalar_f;
+      }
+      break;
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      // Keep the physically meaningful PBRT skin coefficients instead of
+      // deriving medium parameters from the previous material's display color.
+      converted.vector_c = surface_color;
+      converted.scalar_d = roughness;
+      converted.scalar_e = thickness;
+      converted.scalar_f = saturation;
+      if (preset_carries_ior(source)) {
+        converted.scalar_b = ior;
+      }
+      if (source.type == BSDF_PRESET_RANDOM_WALK_SSS ||
+          source.type == BSDF_PRESET_RANDOM_WALK_LAYERED) {
+        converted.vector_a = source.vector_a;
+        converted.vector_b = source.vector_b;
+        converted.scalar_a = source.scalar_a;
+        converted.scalar_c = source.scalar_c;
+        converted.scalar_d = source.scalar_d;
+        converted.scalar_e = source.scalar_e;
+        converted.vector_c = source.type == BSDF_PRESET_RANDOM_WALK_LAYERED &&
+                             !is_zero_vector(source.vector_c)
+            ? source.vector_c
+            : surface_color;
+        converted.scalar_f = source.type == BSDF_PRESET_RANDOM_WALK_LAYERED
+            ? source.scalar_f
+            : saturation;
+      } else if (source.type == BSDF_PRESET_LAYERED ||
+                 source.type == BSDF_PRESET_FAST_LAYERED ||
+                 source.type == BSDF_PRESET_DISNEY_LAYERED) {
+        converted.scalar_d = roughness;
+        converted.scalar_e = thickness;
+      }
+      break;
     case BSDF_PRESET_LAYERED:
     case BSDF_PRESET_FAST_LAYERED:
     case BSDF_PRESET_DISNEY_LAYERED:
@@ -424,6 +630,11 @@ BSDFPreset convert_bsdf_preset_type(const BSDFPreset& source,
       converted.scalar_c = saturation;
       converted.scalar_d = ior;
       converted.scalar_e = subsurface_roughness;
+      if (source.type == BSDF_PRESET_LAYERED ||
+          source.type == BSDF_PRESET_FAST_LAYERED ||
+          source.type == BSDF_PRESET_DISNEY_LAYERED) {
+        converted.scalar_f = source.scalar_f;
+      }
       break;
     default:
       break;
@@ -483,6 +694,8 @@ const char* bsdf_preset_type_name(BSDFPresetType type) {
     case BSDF_PRESET_GLASS: return "Glass";
     case BSDF_PRESET_EMISSION: return "Emission";
     case BSDF_PRESET_APPROXIMATE_BSSRDF: return "Approximate BSSRDF";
+    case BSDF_PRESET_RANDOM_WALK_SSS: return "Random Walk SSS";
+    case BSDF_PRESET_RANDOM_WALK_LAYERED: return "Random Walk Layered";
     case BSDF_PRESET_LAYERED: return "Layered";
     case BSDF_PRESET_FAST_LAYERED: return "Fast Layered";
     case BSDF_PRESET_DISNEY_LAYERED: return "Disney Layered";
@@ -541,6 +754,34 @@ bool render_bsdf_preset_controls(BSDFPreset& preset) {
       changed |= DragDouble3("Skin Color", &preset.vector_a[0], 0.005f);
       changed |= DragDouble("Roughness", &preset.scalar_a, 0.005f);
       break;
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+      ImGui::Text("Medium Controls");
+      changed |= DragDouble3("Sigma A", &preset.vector_a[0], 0.005f);
+      changed |= DragDouble3("Sigma S", &preset.vector_b[0], 0.005f);
+      changed |= DragDouble("Anisotropy g", &preset.scalar_a, 0.005f);
+      changed |= DragDouble("IOR", &preset.scalar_b, 0.005f);
+      changed |= DragDouble("Scale", &preset.scalar_c, 0.005f);
+      changed |= DragDouble3("Subsurface Tint", &preset.vector_c[0], 0.005f);
+      changed |= DragDouble("Saturation", &preset.scalar_f, 0.005f);
+      ImGui::Spacing();
+      ImGui::Text("Boundary Controls");
+      changed |= DragDouble("Surface Roughness", &preset.scalar_d, 0.005f);
+      changed |= DragDouble("Specular Weight", &preset.scalar_e, 0.005f);
+      break;
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      ImGui::Text("Layer Controls");
+      changed |= DragDouble("Gloss Roughness", &preset.scalar_d, 0.005f);
+      changed |= DragDouble("Thickness", &preset.scalar_e, 0.005f);
+      changed |= DragDouble3("Base Color", &preset.vector_c[0], 0.005f);
+      changed |= DragDouble("Saturation", &preset.scalar_f, 0.005f);
+      changed |= DragDouble("IOR", &preset.scalar_b, 0.005f);
+      ImGui::Spacing();
+      ImGui::Text("Random-Walk BSSRDF Controls");
+      changed |= DragDouble3("Sigma A", &preset.vector_a[0], 0.005f);
+      changed |= DragDouble3("Sigma S", &preset.vector_b[0], 0.005f);
+      changed |= DragDouble("Anisotropy g", &preset.scalar_a, 0.005f);
+      changed |= DragDouble("Scale", &preset.scalar_c, 0.005f);
+      break;
     case BSDF_PRESET_LAYERED:
     case BSDF_PRESET_FAST_LAYERED:
     case BSDF_PRESET_DISNEY_LAYERED:
@@ -550,6 +791,7 @@ bool render_bsdf_preset_controls(BSDFPreset& preset) {
       changed |= DragDouble3("Base Color", &preset.vector_a[0], 0.005f);
       changed |= DragDouble("Saturation", &preset.scalar_c, 0.005f);
       changed |= DragDouble("IOR", &preset.scalar_d, 0.005f);
+      changed |= DragDouble("Pooling Strength", &preset.scalar_f, 0.005f);
       ImGui::Spacing();
       ImGui::Text("Base BSSRDF Controls");
       changed |= DragDouble3("Skin Color", &preset.vector_b[0], 0.005f);
@@ -580,24 +822,36 @@ BSDF* create_bsdf_from_preset(const BSDFPreset& preset) {
       return new EmissionBSDF(preset.vector_a);
     case BSDF_PRESET_APPROXIMATE_BSSRDF:
       return new ApproximateBSSRDF(preset.vector_a, preset.scalar_a);
+    case BSDF_PRESET_RANDOM_WALK_SSS:
+      return new RandomWalkSSSBSDF(preset.vector_a, preset.vector_b,
+                                   preset.scalar_a, preset.scalar_b,
+                                   preset.scalar_c, preset.scalar_d,
+                                   preset.scalar_e, preset.type,
+                                   preset.vector_c, preset.scalar_f);
+    case BSDF_PRESET_RANDOM_WALK_LAYERED:
+      return new RandomWalkSSSBSDF(preset.vector_a, preset.vector_b,
+                                   preset.scalar_a, preset.scalar_b,
+                                   preset.scalar_c, preset.scalar_d,
+                                   preset.scalar_e, preset.type,
+                                   preset.vector_c, preset.scalar_f);
     case BSDF_PRESET_LAYERED: {
       LayeredBSDF* bsdf = new LayeredBSDF(preset.scalar_a, preset.scalar_b,
                                           preset.vector_a, preset.scalar_c,
-                                          preset.scalar_d);
+                                          preset.scalar_d, preset.scalar_f);
       bsdf->apply_preset(preset);
       return bsdf;
     }
     case BSDF_PRESET_FAST_LAYERED: {
       FastLayeredBSDF* bsdf = new FastLayeredBSDF(preset.scalar_a, preset.scalar_b,
                                                   preset.vector_a, preset.scalar_c,
-                                                  preset.scalar_d);
+                                                  preset.scalar_d, preset.scalar_f);
       bsdf->apply_preset(preset);
       return bsdf;
     }
     case BSDF_PRESET_DISNEY_LAYERED: {
       DisneyLayeredBSDF* bsdf =
           new DisneyLayeredBSDF(preset.scalar_a, preset.scalar_b, preset.vector_a,
-                                preset.scalar_c, preset.scalar_d);
+                                preset.scalar_c, preset.scalar_d, preset.scalar_f);
       bsdf->apply_preset(preset);
       return bsdf;
     }
@@ -756,6 +1010,106 @@ void ApproximateBSSRDF::apply_preset(const BSDFPreset& preset) {
   roughness = preset.scalar_a;
 }
 
+Vector3D RandomWalkSSSBSDF::diffuse_fallback_color() const {
+  Vector3D base = sigma_albedo(sigma_a, sigma_s);
+  if (!is_zero_vector(base_color)) {
+    base = base * saturated_base_tint(base_color, saturation);
+  }
+  return clamp_color01(base);
+}
+
+Vector3D RandomWalkSSSBSDF::f(const Vector3D wo, const Vector3D wi) {
+  if (wo.z <= 0.0 || wi.z <= 0.0) return Vector3D(0, 0, 0);
+  return diffuse_fallback_color() / PI;
+}
+
+Vector3D RandomWalkSSSBSDF::sample_f(const Vector3D wo, Vector3D *wi, double *pdf) {
+  if (wo.z <= 0.0) {
+    *pdf = 0.0;
+    return Vector3D(0, 0, 0);
+  }
+
+  *wi = sampler.get_sample(pdf);
+  return f(wo, *wi);
+}
+
+void RandomWalkSSSBSDF::render_debugger_node()
+{
+  const char* node_name = preset_type == BSDF_PRESET_RANDOM_WALK_LAYERED
+      ? "Random Walk Layered BSDF"
+      : "Random Walk SSS BSDF";
+  if (ImGui::TreeNode(this, "%s", node_name))
+  {
+    if (preset_type == BSDF_PRESET_RANDOM_WALK_LAYERED) {
+      ImGui::Text("Layer Controls");
+      DragDouble("Gloss Roughness", &surface_roughness, 0.005);
+      DragDouble("Thickness", &specular_weight, 0.005);
+      DragDouble3("Base Color", &base_color[0], 0.005);
+      DragDouble("Saturation", &saturation, 0.005);
+      DragDouble("IOR", &ior, 0.005);
+      ImGui::Spacing();
+      ImGui::Text("Random-Walk BSSRDF Controls");
+    }
+    DragDouble3("Sigma A", &sigma_a[0], 0.005);
+    DragDouble3("Sigma S", &sigma_s[0], 0.005);
+    DragDouble("Anisotropy g", &anisotropy_g, 0.005);
+    DragDouble("Scale", &scale, 0.005);
+    if (preset_type != BSDF_PRESET_RANDOM_WALK_LAYERED) {
+      DragDouble3("Subsurface Tint", &base_color[0], 0.005);
+      DragDouble("Saturation", &saturation, 0.005);
+      DragDouble("IOR", &ior, 0.005);
+      DragDouble("Surface Roughness", &surface_roughness, 0.005);
+      DragDouble("Specular Weight", &specular_weight, 0.005);
+    }
+    sigma_a = clamp_vector_min(sigma_a, 0.0);
+    sigma_s = clamp_vector_min(sigma_s, 0.0);
+    base_color = clamp_color01(base_color);
+    anisotropy_g = clamp(anisotropy_g, -0.95, 0.95);
+    ior = max(ior, 1.0001);
+    scale = max(scale, 1e-6);
+    surface_roughness = clamp(surface_roughness, 0.02, 1.0);
+    specular_weight = clamp(specular_weight, 0.0, 1.0);
+    saturation = max(saturation, 0.0);
+    ImGui::TreePop();
+  }
+}
+
+BSDFPreset RandomWalkSSSBSDF::get_preset() const {
+  BSDFPreset preset;
+  preset.type = preset_type;
+  preset.vector_a = sigma_a;
+  preset.vector_b = sigma_s;
+  preset.scalar_a = anisotropy_g;
+  preset.scalar_b = ior;
+  preset.scalar_c = scale;
+  preset.scalar_d = surface_roughness;
+  preset.scalar_e = specular_weight;
+  preset.vector_c = base_color;
+  preset.scalar_f = saturation;
+  return preset;
+}
+
+void RandomWalkSSSBSDF::apply_preset(const BSDFPreset& preset) {
+  if (preset.type != BSDF_PRESET_RANDOM_WALK_SSS &&
+      preset.type != BSDF_PRESET_RANDOM_WALK_LAYERED) {
+    return;
+  }
+  preset_type = preset.type;
+  sigma_a = clamp_vector_min(preset.vector_a, 0.0);
+  sigma_s = clamp_vector_min(preset.vector_b, 0.0);
+  anisotropy_g = clamp(preset.scalar_a, -0.95, 0.95);
+  ior = max(preset.scalar_b, 1.0001);
+  scale = max(preset.scalar_c, 1e-6);
+  surface_roughness = clamp(preset.scalar_d, 0.02, 1.0);
+  specular_weight = clamp(preset.scalar_e, 0.0, 1.0);
+  base_color = !is_zero_vector(preset.vector_c)
+      ? clamp_color01(preset.vector_c)
+      : (preset_type == BSDF_PRESET_RANDOM_WALK_LAYERED
+          ? Vector3D(0.8, 0.2, 0.2)
+          : Vector3D(1.0));
+  saturation = max(preset.scalar_f, 0.0);
+}
+
 // Uncomment this version for iteration 2
 /**
  * Evaluate Layered BSDF.
@@ -857,6 +1211,50 @@ Vector3D LayeredBSDF::f(const Vector3D wo, const Vector3D wi) {
   return saturated_base * (1.0 - thickness) + gloss_tinted * thickness;
 }
 
+Vector3D LayeredBSDF::f(const Vector3D wo, const Vector3D wi,
+                        const Vector2D uv) {
+  if (pooling_strength <= 0.0) return f(wo, wi);
+  if (wo.z <= 0.0 || wi.z <= 0.0) return Vector3D(0, 0, 0);
+
+  double local_roughness, local_thickness, local_saturation;
+  pooled_layer_params(uv, pooling_strength, roughness, thickness, saturation,
+                      &local_roughness, &local_thickness, &local_saturation);
+
+  Vector3D base_contrib = base_layer->f(wo, wi);
+  Vector3D saturated_base = base_contrib * local_saturation;
+
+  Vector3D h = wo + wi;
+  if (h.norm2() == 0.0) return Vector3D(0, 0, 0);
+  h.normalize();
+
+  double alpha = max(local_roughness * local_roughness, 0.001);
+  double alpha2 = alpha * alpha;
+
+  double actual_ior = max(ior, 1.0001);
+  double R0 = pow((1.0 - actual_ior) / (1.0 + actual_ior), 2.0);
+  double cos_theta_d = max(dot(wi, h), 0.0);
+  double F = R0 + (1.0 - R0) * pow(1.0 - cos_theta_d, 5.0);
+
+  double cos_theta_h = max(h.z, 0.0);
+  double cos2_theta_h = cos_theta_h * cos_theta_h;
+  double D_denom = PI * pow(cos2_theta_h * (alpha2 - 1.0) + 1.0, 2.0);
+  double D = (D_denom > 0.0) ? (alpha2 / D_denom) : 0.0;
+
+  auto G1 = [](double cos_theta, double a2) {
+    double cos2_theta = cos_theta * cos_theta;
+    return (2.0 * cos_theta) / (cos_theta + sqrt(a2 + (1.0 - a2) * cos2_theta));
+  };
+  double G = G1(wo.z, alpha2) * G1(wi.z, alpha2);
+
+  double ct_val = (D * F * G) / (4.0 * wi.z * wo.z);
+  ct_val = min(ct_val, 1.0);
+
+  Vector3D gloss(ct_val, ct_val, ct_val);
+  Vector3D gloss_tinted = gloss + (base_color * 0.15) * ct_val;
+  return saturated_base * (1.0 - local_thickness) +
+         gloss_tinted * local_thickness;
+}
+
 /**
  * Sample Layered BSDF.
  * Probabilistically samples from base or gloss layer based on thickness.
@@ -900,6 +1298,43 @@ Vector3D LayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf) {
   return f(wo, *wi);
 }
 
+Vector3D LayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf,
+                               const Vector2D uv) {
+  if (pooling_strength <= 0.0) return sample_f(wo, wi, pdf);
+  if (wo.z <= 0.0) {
+    *pdf = 0.0;
+    return Vector3D(0, 0, 0);
+  }
+
+  double local_roughness, local_thickness, local_saturation;
+  pooled_layer_params(uv, pooling_strength, roughness, thickness, saturation,
+                      &local_roughness, &local_thickness, &local_saturation);
+  (void)local_saturation;
+  double gloss_weight = clamp(local_thickness, 0.0, 1.0);
+  double base_weight = 1.0 - gloss_weight;
+
+  if (random_uniform() < gloss_weight) {
+    double sampled_gloss_pdf = 0.0;
+    if (!sample_layered_gloss_lobe(wo, local_roughness, wi, &sampled_gloss_pdf)) {
+      *pdf = 0.0;
+      return Vector3D(0, 0, 0);
+    }
+  } else {
+    double base_pdf;
+    base_layer->sample_f(wo, wi, &base_pdf);
+    if (base_pdf <= 0.0 || wi->z <= 0.0) {
+      *pdf = 0.0;
+      return Vector3D(0, 0, 0);
+    }
+  }
+
+  double base_pdf = cosine_hemisphere_pdf(*wi);
+  double gloss_pdf = layered_gloss_pdf(wo, *wi, local_roughness);
+  *pdf = base_weight * base_pdf + gloss_weight * gloss_pdf;
+  if (*pdf <= 1e-10) return Vector3D(0, 0, 0);
+  return f(wo, *wi, uv);
+}
+
 void LayeredBSDF::render_debugger_node()
 {
   if (ImGui::TreeNode(this, "Layered BSDF"))
@@ -910,6 +1345,7 @@ void LayeredBSDF::render_debugger_node()
     changed |= DragDouble3("Base Color", &base_color[0], 0.005);
     changed |= DragDouble("Saturation", &saturation, 0.005);
     changed |= DragDouble("IOR", &ior, 0.005);
+    changed |= DragDouble("Pooling Strength", &pooling_strength, 0.005);
     ImGui::Spacing();
     ImGui::Text("Base BSSRDF");
     changed |= DragDouble3("Skin Color", &subsurface_color[0], 0.005);
@@ -931,6 +1367,7 @@ BSDFPreset LayeredBSDF::get_preset() const {
   preset.scalar_c = saturation;
   preset.scalar_d = ior;
   preset.scalar_e = subsurface_roughness;
+  preset.scalar_f = pooling_strength;
   return preset;
 }
 
@@ -943,6 +1380,7 @@ void LayeredBSDF::apply_preset(const BSDFPreset& preset) {
   ior = preset.scalar_d;
   subsurface_color = preset.vector_b;
   subsurface_roughness = preset.scalar_e;
+  pooling_strength = clamp(preset.scalar_f, 0.0, 1.0);
   sync_base_layer(base_layer, subsurface_color, subsurface_roughness);
 }
 
@@ -999,6 +1437,42 @@ Vector3D FastLayeredBSDF::f(const Vector3D wo, const Vector3D wi) {
   return saturated_base * (1.0 - thickness) + gloss_tinted * thickness;
 }
 
+Vector3D FastLayeredBSDF::f(const Vector3D wo, const Vector3D wi,
+                            const Vector2D uv) {
+  if (pooling_strength <= 0.0) return f(wo, wi);
+  if (wo.z <= 0.0 || wi.z <= 0.0) return Vector3D(0, 0, 0);
+
+  double local_roughness, local_thickness, local_saturation;
+  pooled_layer_params(uv, pooling_strength, roughness, thickness, saturation,
+                      &local_roughness, &local_thickness, &local_saturation);
+
+  Vector3D base_contrib = base_layer->f(wo, wi);
+  Vector3D saturated_base = base_contrib * local_saturation;
+
+  Vector3D h = wo + wi;
+  if (h.norm2() == 0.0) return Vector3D(0, 0, 0);
+  h.normalize();
+
+  double r4 = max(pow(local_roughness, 4.0), 0.0001);
+  double exponent = max((2.0 / r4) - 2.0, 0.0);
+
+  double actual_ior = max(ior, 1.0001);
+  double R0 = pow((1.0 - actual_ior) / (1.0 + actual_ior), 2.0);
+  double cos_theta_d = max(dot(wi, h), 0.0);
+  double F = R0 + (1.0 - R0) * pow(1.0 - cos_theta_d, 5.0);
+
+  double cos_theta_h = max(h.z, 0.0);
+  double D = ((exponent + 2.0) / (2.0 * PI)) * pow(cos_theta_h, exponent);
+  double cos_wo_h = max(dot(wo, h), 0.001);
+  double ct_val = (D * F) / (4.0 * cos_wo_h * cos_wo_h);
+  ct_val = min(ct_val, 1.0);
+
+  Vector3D gloss(ct_val, ct_val, ct_val);
+  Vector3D gloss_tinted = gloss + (base_color * 0.15) * ct_val;
+  return saturated_base * (1.0 - local_thickness) +
+         gloss_tinted * local_thickness;
+}
+
 /**
  * sample fast layered BSDF.
  */
@@ -1040,6 +1514,43 @@ Vector3D FastLayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf)
   return f(wo, *wi);
 }
 
+Vector3D FastLayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf,
+                                   const Vector2D uv) {
+  if (pooling_strength <= 0.0) return sample_f(wo, wi, pdf);
+  if (wo.z <= 0.0) {
+    *pdf = 0.0;
+    return Vector3D(0, 0, 0);
+  }
+
+  double local_roughness, local_thickness, local_saturation;
+  pooled_layer_params(uv, pooling_strength, roughness, thickness, saturation,
+                      &local_roughness, &local_thickness, &local_saturation);
+  (void)local_saturation;
+  double gloss_weight = clamp(local_thickness, 0.0, 1.0);
+  double base_weight = 1.0 - gloss_weight;
+
+  if (random_uniform() < gloss_weight) {
+    double sampled_gloss_pdf = 0.0;
+    if (!sample_fast_layered_gloss_lobe(wo, local_roughness, wi, &sampled_gloss_pdf)) {
+      *pdf = 0.0;
+      return Vector3D(0, 0, 0);
+    }
+  } else {
+    double base_pdf;
+    base_layer->sample_f(wo, wi, &base_pdf);
+    if (base_pdf <= 0.0 || wi->z <= 0.0) {
+      *pdf = 0.0;
+      return Vector3D(0, 0, 0);
+    }
+  }
+
+  double base_pdf = cosine_hemisphere_pdf(*wi);
+  double gloss_pdf = fast_layered_gloss_pdf(wo, *wi, local_roughness);
+  *pdf = base_weight * base_pdf + gloss_weight * gloss_pdf;
+  if (*pdf <= 1e-10) return Vector3D(0, 0, 0);
+  return f(wo, *wi, uv);
+}
+
 void FastLayeredBSDF::render_debugger_node()
 {
   if (ImGui::TreeNode(this, "Fast Layered BSDF"))
@@ -1050,6 +1561,7 @@ void FastLayeredBSDF::render_debugger_node()
     changed |= DragDouble3("Base Color", &base_color[0], 0.005);
     changed |= DragDouble("Saturation", &saturation, 0.005);
     changed |= DragDouble("IOR", &ior, 0.005);
+    changed |= DragDouble("Pooling Strength", &pooling_strength, 0.005);
     ImGui::Spacing();
     ImGui::Text("Base BSSRDF");
     changed |= DragDouble3("Skin Color", &subsurface_color[0], 0.005);
@@ -1071,6 +1583,7 @@ BSDFPreset FastLayeredBSDF::get_preset() const {
   preset.scalar_c = saturation;
   preset.scalar_d = ior;
   preset.scalar_e = subsurface_roughness;
+  preset.scalar_f = pooling_strength;
   return preset;
 }
 
@@ -1083,6 +1596,7 @@ void FastLayeredBSDF::apply_preset(const BSDFPreset& preset) {
   ior = preset.scalar_d;
   subsurface_color = preset.vector_b;
   subsurface_roughness = preset.scalar_e;
+  pooling_strength = clamp(preset.scalar_f, 0.0, 1.0);
   sync_base_layer(base_layer, subsurface_color, subsurface_roughness);
 }
 
@@ -1203,6 +1717,67 @@ Vector3D DisneyLayeredBSDF::f(const Vector3D wo, const Vector3D wi) {
   */
 }
 
+Vector3D DisneyLayeredBSDF::f(const Vector3D wo, const Vector3D wi,
+                              const Vector2D uv) {
+  if (pooling_strength <= 0.0) return f(wo, wi);
+  if (wo.z <= 0.0 || wi.z <= 0.0) return Vector3D(0, 0, 0);
+
+  double local_roughness, local_thickness, local_saturation;
+  pooled_layer_params(uv, pooling_strength, roughness, thickness, saturation,
+                      &local_roughness, &local_thickness, &local_saturation);
+
+  Vector3D h = wo + wi;
+  if (h.norm2() == 0.0) return Vector3D(0, 0, 0);
+  h.normalize();
+
+  double cos_theta_i = wi.z;
+  double cos_theta_o = wo.z;
+  double cos_theta_d = max(dot(wi, h), 0.0);
+
+  auto schlick_weight = [](double cos_theta) {
+    double m = clamp(1.0 - cos_theta, 0.0, 1.0);
+    return pow(m, 5.0);
+  };
+
+  double fss90 = subsurface_roughness * cos_theta_d * cos_theta_d;
+  double fss_in = 1.0 + (fss90 - 1.0) * schlick_weight(cos_theta_i);
+  double fss_out = 1.0 + (fss90 - 1.0) * schlick_weight(cos_theta_o);
+  double ss_factor = 1.25 * (fss_in * fss_out *
+      (1.0 / (cos_theta_i + cos_theta_o + 0.05) - 0.5) + 0.5);
+
+  Vector3D subsurface_bleed = subsurface_color * 0.8 +
+                              Vector3D(0.8, 0.1, 0.1) * 0.2;
+  Vector3D flesh_contrib =
+      (subsurface_bleed / PI) * ss_factor * local_saturation;
+
+  double gloss_roughness = max(local_roughness * 0.8, 0.02);
+  double alpha2_gloss = max(gloss_roughness * gloss_roughness, 0.0004);
+
+  double R0 = pow((1.0 - ior) / (1.0 + ior), 2.0);
+  double F_gloss = R0 + (1.0 - R0) * schlick_weight(cos_theta_d);
+
+  double cos_theta_h = max(h.z, 0.0);
+  double cos2_theta_h = cos_theta_h * cos_theta_h;
+  double D_denom = PI * pow(cos2_theta_h * (alpha2_gloss - 1.0) + 1.0, 2.0);
+  double D = (D_denom > 0.0) ? (alpha2_gloss / D_denom) : 0.0;
+
+  auto G1 = [](double cos_theta, double a2) {
+    double cos2_theta = cos_theta * cos_theta;
+    return (2.0 * cos_theta) / (cos_theta + sqrt(a2 + (1.0 - a2) * cos2_theta));
+  };
+  double G = G1(cos_theta_o, alpha2_gloss) * G1(cos_theta_i, alpha2_gloss);
+
+  double gloss_val = (D * F_gloss * G) /
+                     (4.0 * max(cos_theta_i * cos_theta_o, 0.001));
+  gloss_val = min(gloss_val, 5.0);
+  Vector3D gloss_contrib(gloss_val, gloss_val, gloss_val);
+
+  Vector3D gloss_tinted = gloss_contrib + (base_color * 0.15) * gloss_val;
+  Vector3D final_flesh = flesh_contrib * (1.0 - F_gloss * 0.6);
+  return final_flesh * (1.0 - local_thickness) +
+         gloss_tinted * local_thickness;
+}
+
 Vector3D DisneyLayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pdf) {
   if (wo.z <= 0.0) {
     *pdf = 0.0;
@@ -1256,6 +1831,43 @@ Vector3D DisneyLayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi, double* pd
   return f(wo, *wi);
 }
 
+Vector3D DisneyLayeredBSDF::sample_f(const Vector3D wo, Vector3D* wi,
+                                     double* pdf, const Vector2D uv) {
+  if (pooling_strength <= 0.0) return sample_f(wo, wi, pdf);
+  if (wo.z <= 0.0) {
+    *pdf = 0.0;
+    return Vector3D(0, 0, 0);
+  }
+
+  double local_roughness, local_thickness, local_saturation;
+  pooled_layer_params(uv, pooling_strength, roughness, thickness, saturation,
+                      &local_roughness, &local_thickness, &local_saturation);
+  (void)local_saturation;
+  double gloss_weight = clamp(local_thickness, 0.0, 1.0);
+  double base_weight = 1.0 - gloss_weight;
+
+  if (random_uniform() < gloss_weight) {
+    double sampled_gloss_pdf = 0.0;
+    if (!sample_disney_gloss_lobe(wo, local_roughness, wi, &sampled_gloss_pdf)) {
+      *pdf = 0.0;
+      return Vector3D(0, 0, 0);
+    }
+  } else {
+    double base_pdf;
+    base_layer->sample_f(wo, wi, &base_pdf);
+    if (base_pdf <= 0.0 || wi->z <= 0.0) {
+      *pdf = 0.0;
+      return Vector3D(0, 0, 0);
+    }
+  }
+
+  double base_pdf = cosine_hemisphere_pdf(*wi);
+  double gloss_pdf = disney_gloss_pdf(wo, *wi, local_roughness);
+  *pdf = base_weight * base_pdf + gloss_weight * gloss_pdf;
+  if (*pdf <= 1e-10) return Vector3D(0, 0, 0);
+  return f(wo, *wi, uv);
+}
+
 void DisneyLayeredBSDF::render_debugger_node()
 {
   if (ImGui::TreeNode(this, "Disney Layered BSDF"))
@@ -1266,6 +1878,7 @@ void DisneyLayeredBSDF::render_debugger_node()
     changed |= DragDouble3("Base Color", &base_color[0], 0.005);
     changed |= DragDouble("Saturation", &saturation, 0.005);
     changed |= DragDouble("IOR", &ior, 0.005);
+    changed |= DragDouble("Pooling Strength", &pooling_strength, 0.005);
     ImGui::Spacing();
     ImGui::Text("Base BSSRDF");
     changed |= DragDouble3("Skin Color", &subsurface_color[0], 0.005);
@@ -1287,6 +1900,7 @@ BSDFPreset DisneyLayeredBSDF::get_preset() const {
   preset.scalar_c = saturation;
   preset.scalar_d = ior;
   preset.scalar_e = subsurface_roughness;
+  preset.scalar_f = pooling_strength;
   return preset;
 }
 
@@ -1299,6 +1913,7 @@ void DisneyLayeredBSDF::apply_preset(const BSDFPreset& preset) {
   ior = preset.scalar_d;
   subsurface_color = preset.vector_b;
   subsurface_roughness = preset.scalar_e;
+  pooling_strength = clamp(preset.scalar_f, 0.0, 1.0);
   sync_base_layer(base_layer, subsurface_color, subsurface_roughness);
 }
 

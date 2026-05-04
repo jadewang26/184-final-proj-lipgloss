@@ -28,9 +28,11 @@ Mesh::Mesh(const HalfedgeMesh& mesh, BSDF* bsdf) {
 
   positions = new Vector3D[vertexI];
   normals   = new Vector3D[vertexI];
+  texcoords = new Vector2D[vertexI];
   for (int i = 0; i < vertexI; i++) {
     positions[i] = verts[i]->position;
     normals[i]   = verts[i]->normal;
+    texcoords[i] = verts[i]->texcoord;
   }
 
   for (FaceCIter f = mesh.facesBegin(); f != mesh.facesEnd(); f++) {

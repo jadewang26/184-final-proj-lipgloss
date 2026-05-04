@@ -1114,23 +1114,75 @@ void ColladaParser::parse_material ( XMLElement* xml, MaterialInfo& material ) {
           double roughness = e_roughness ? atof(e_roughness->GetText()) : 0.3;
           BSDF* bsdf = new ApproximateBSSRDF(skin_color, roughness);
           material.bsdf = bsdf;
+        } else if (type == "random_walk_sss" || type == "random_walk_layered") {
+          XMLElement *e_sigma_a = get_element(e_bsdf, "sigma_a");
+          XMLElement *e_sigma_s = get_element(e_bsdf, "sigma_s");
+          XMLElement *e_g = get_element(e_bsdf, "g");
+          XMLElement *e_ior = get_element(e_bsdf, "ior");
+          XMLElement *e_scale = get_element(e_bsdf, "scale");
+          XMLElement *e_surface_roughness = get_element(e_bsdf, "surface_roughness");
+          XMLElement *e_specular_weight = get_element(e_bsdf, "specular_weight");
+          XMLElement *e_gloss_roughness = get_element(e_bsdf, "roughness");
+          XMLElement *e_gloss_weight = get_element(e_bsdf, "thickness");
+          XMLElement *e_base_color = get_element(e_bsdf, "base_color");
+          XMLElement *e_saturation = get_element(e_bsdf, "saturation");
+          bool is_random_walk_layered = type == "random_walk_layered";
+
+          Vector3D sigma_a = e_sigma_a
+              ? spectrum_from_string(string(e_sigma_a->GetText()))
+              : Vector3D(0.013, 0.070, 0.145);
+          Vector3D sigma_s = e_sigma_s
+              ? spectrum_from_string(string(e_sigma_s->GetText()))
+              : Vector3D(1.09, 1.59, 1.79);
+          double g = e_g ? atof(e_g->GetText()) : 0.0;
+          double ior = e_ior ? atof(e_ior->GetText()) : 1.3;
+          double scale = e_scale ? atof(e_scale->GetText()) : 5.0;
+          double surface_roughness = e_surface_roughness
+              ? atof(e_surface_roughness->GetText())
+              : (e_gloss_roughness
+                  ? atof(e_gloss_roughness->GetText())
+                  : (is_random_walk_layered ? 0.15 : 0.55));
+          double specular_weight = e_specular_weight
+              ? atof(e_specular_weight->GetText())
+              : (e_gloss_weight
+                  ? atof(e_gloss_weight->GetText())
+                  : (is_random_walk_layered ? 0.5 : 0.3));
+          Vector3D base_color = e_base_color
+              ? spectrum_from_string(string(e_base_color->GetText()))
+              : (is_random_walk_layered ? Vector3D(0.8, 0.2, 0.2)
+                                        : Vector3D(1.0));
+          double saturation = e_saturation ? atof(e_saturation->GetText()) : 1.0;
+          BSDFPresetType preset_type = is_random_walk_layered
+              ? BSDF_PRESET_RANDOM_WALK_LAYERED
+              : BSDF_PRESET_RANDOM_WALK_SSS;
+
+          BSDF* bsdf = new RandomWalkSSSBSDF(sigma_a, sigma_s, g, ior, scale,
+                                             surface_roughness, specular_weight,
+                                             preset_type, base_color,
+                                             saturation);
+          material.bsdf = bsdf;
         } else if (type == "layered") {
           XMLElement *e_roughness = get_element(e_bsdf, "roughness");
           XMLElement *e_thickness = get_element(e_bsdf, "thickness");
           XMLElement *e_base_color = get_element(e_bsdf, "base_color");
           XMLElement *e_saturation = get_element(e_bsdf, "saturation");
           XMLElement *e_ior = get_element(e_bsdf, "ior");
+          XMLElement *e_pooling_strength = get_element(e_bsdf, "pooling_strength");
+          XMLElement *e_pooling = get_element(e_bsdf, "pooling");
           
           double roughness = e_roughness ? atof(e_roughness->GetText()) : 0.0;
           double thickness = e_thickness ? atof(e_thickness->GetText()) : 0.5;
           Vector3D base_color = e_base_color ? spectrum_from_string(string(e_base_color->GetText())) : Vector3D(0.8, 0.8, 0.8);
           double saturation = e_saturation ? atof(e_saturation->GetText()) : 1.0;
           double ior = e_ior ? atof(e_ior->GetText()) : 1.5;
+          double pooling_strength = e_pooling_strength
+              ? atof(e_pooling_strength->GetText())
+              : (e_pooling ? atof(e_pooling->GetText()) : 0.0);
           
           // CHANGE LayeredBSDF HERE
-          // BSDF* bsdf = new LayeredBSDF(roughness, thickness, base_color, saturation, ior);
-          // BSDF* bsdf = new FastLayeredBSDF(roughness, thickness, base_color, saturation, ior);
-          BSDF* bsdf = new DisneyLayeredBSDF(roughness, thickness, base_color, saturation, ior);
+          // BSDF* bsdf = new LayeredBSDF(roughness, thickness, base_color, saturation, ior, pooling_strength);
+          // BSDF* bsdf = new FastLayeredBSDF(roughness, thickness, base_color, saturation, ior, pooling_strength);
+          BSDF* bsdf = new DisneyLayeredBSDF(roughness, thickness, base_color, saturation, ior, pooling_strength);
           material.bsdf = bsdf;
         }
         e_bsdf = e_bsdf->NextSiblingElement();
