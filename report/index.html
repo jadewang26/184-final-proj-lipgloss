@@ -1,0 +1,421 @@
+<html>
+  <head>
+    <script>
+      MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        }
+      };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;display=swap" rel="stylesheet">
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+        color: #111;
+      }
+
+      h1 {
+        text-align: center;
+      }
+
+      h2 {
+        margin-top: 34px;
+      }
+
+      h3 {
+        margin-top: 22px;
+      }
+
+      p,
+      li {
+        line-height: 1.55;
+      }
+
+      .container {
+        margin: 0 auto;
+        padding: 60px 20%;
+      }
+
+      figure {
+        text-align: center;
+      }
+
+      img {
+        display: inline-block;
+        max-width: 100%;
+        height: auto;
+        border: 1px solid #d0d0d0;
+        border-radius: 4px;
+        box-sizing: border-box;
+      }
+
+      code,
+      pre {
+        font-size: 0.95em;
+      }
+
+      pre {
+        padding: 14px;
+        border: 1px solid #ccc;
+        background: #f8f8f8;
+        overflow-x: auto;
+      }
+
+      .screenshot-grid {
+        width: 100%;
+        text-align: center;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      .screenshot-grid td {
+        padding: 0 10px 18px;
+        vertical-align: top;
+      }
+
+      .screenshot-grid img {
+        width: 100%;
+      }
+
+      figcaption {
+        margin-top: 6px;
+        font-size: 0.92em;
+      }
+
+      .small {
+        font-size: 0.92em;
+      }
+
+      .cite {
+        white-space: nowrap;
+      }
+
+      .references {
+        padding-left: 24px;
+      }
+
+      .references li {
+        margin-bottom: 8px;
+      }
+
+      .references a {
+        word-break: break-word;
+      }
+
+      @media print {
+        body {
+          font-size: 10pt;
+        }
+
+        .container {
+          padding: 20px 7%;
+        }
+
+        h1 {
+          font-size: 18pt;
+          margin-bottom: 6px;
+        }
+
+        h2 {
+          font-size: 14pt;
+          margin-top: 18px;
+        }
+
+        h3 {
+          font-size: 11.5pt;
+          margin-top: 12px;
+        }
+
+        p,
+        li {
+          line-height: 1.35;
+        }
+
+        pre {
+          font-size: 8pt;
+          padding: 8px;
+        }
+
+        .screenshot-grid td {
+          padding: 0 6px 8px;
+        }
+
+        a {
+          color: #111;
+          text-decoration: none;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container">
+
+
+      <h3>Bias issue and fix. Probably fits in the challenges section.</h3>
+      <p>
+        The layered BSDFs evaluate the following mixture model:
+        \[
+          f(\omega_o,\omega_i) = (1-t) f_{base}(\omega_o,\omega_i) + t f_{gloss}(\omega_o,\omega_i).
+        \]
+        </p>
+        where \(f_{base}\) and \(f_{gloss}\) are the <code>ApproximateBSSRDF</code> base and gloss components respectively.
+        <p>
+        Our original sampler updated <code>pdf</code> to correspond toeither the base or gloss branch while returning the full BSDF value.
+        For the path tracing estimator
+        \(f L_i |\cos\theta_i| / p(\omega_i)\), the PDF must be the same density that could
+        have produced the sampled direction <a class="cite" href="#ref-pbrt">[1, pp. 56-58]</a>. 
+        In other words, the denominator (<code>pdf</code>) came from only one branch, that messed up our estimator. 
+        We corrected this by setting <code>pdf</code> to the mixture density
+        \[
+          p_{mix}(\omega_i) = (1-t)p_{base}(\omega_i) + t p_{gloss}(\omega_i).
+        \]
+
+      </p>
+      Old code: sample one branch, but return only that branch's pdf.
+      <pre><code>// src/pathtracer/bsdf.cpp, DisneyLayeredBSDF::sample_f
+
+if (random_uniform() &lt; gloss_weight) {
+  sample_disney_gloss_lobe(wo, roughness, wi, pdf);
+} else {
+  base_layer-&gt;sample_f(wo, wi, pdf);
+}
+return f(wo, *wi);  // f is still the full base + gloss BSDF
+</code></pre>
+Fixed code: sample one branch, then report the full mixture pdf.
+      <pre><code>double gloss_weight = clamp(thickness, 0.0, 1.0);
+double base_weight = 1.0 - gloss_weight;
+
+if (random_uniform() &lt; gloss_weight) {
+  sample_disney_gloss_lobe(wo, roughness, wi, &amp;sampled_gloss_pdf);
+} else {
+  base_layer-&gt;sample_f(wo, wi, &amp;base_pdf);
+}
+
+double base_pdf = cosine_hemisphere_pdf(*wi);
+double gloss_pdf = disney_gloss_pdf(wo, *wi, roughness);
+*pdf = base_weight * base_pdf + gloss_weight * gloss_pdf;
+return *pdf &gt; 1e-10 ? f(wo, *wi) : Vector3D(0, 0, 0);</code></pre>
+      <p>
+        We also added in a test for numerical stability for added safety.
+      </p>
+
+      <h3>Volumetric random-walk SSS</h3>
+      <figure>
+        <img src="images/volumetric-sss/sss_local.png" />
+        <figcaption>
+          Image from
+          <a class="cite" href="#ref-mjp-sss">[4]</a>.
+        </figcaption>
+      </figure>
+      <p>
+        We wanted to compare the rendering output of the BSSRDF approximation to a subsurface scattering implementation based on volumetric light transport. 
+        This idea was mentioned in Section 4.3.2 of PBRT <a class="cite" href="#ref-pbrt">[1, pp. 159]</a> and argued to produce more natural looking results in Chiang et. al. <a class="cite" href="#ref-chiang">[5]</a> (although we do not use their reparameterization).
+        Our implementation of random-walk subsurface scattering estimation follows.
+      </p>
+      <p>
+        The random walk estimation uses absorption \(\sigma_a\), scattering \(\sigma_s\), anisotropy <code>g</code>, index of refraction <code>ior</code>, scale,
+        roughness, and specular weight parameters implemented in the <code>RandomWalkSSSBSDF</code> class. The path integrator detects this material on
+        spheres or watertight triangle meshes then enters the object and samples the free flight distances
+        \[
+          d_s = -\log(1-\xi)/\bar{\sigma_t}, \quad
+          \bar{\sigma_t} = (\sigma_{t,r}+\sigma_{t,g}+\sigma_{t,b})/3
+        \]
+        where \(\xi\) is a random variable uniformly samled from \([0, 1]\).
+        If a scatter occurs before the ray exits the volume we attenuate the transmitted light (<code>throughput</code>) by
+        \(\exp(-\sigma_a d_s)\sigma_s/(\sigma_a+\sigma_s)\) and the resample the direction using the
+        Henyey-Greenstein phase function
+        <a class="cite" href="#ref-pbrt">[1, pp. 711-713]</a>, <a class="cite" href="#ref-henyey-greenstein">[2]</a>.
+        The maximum number of internal reflections is capped at 16 and is not related to <code>max_ray_depth</code>.
+      </p>
+      <pre><code>// src/pathtracer/pathtracer.cpp
+if (scatter_distance < boundary_distance) {
+  throughput *= exp_vector(-sigma_a * scatter_distance) * albedo;
+  position += direction * scatter_distance;
+  direction = sample_henyey_greenstein(direction, bsdf-&gt;get_anisotropy_g());
+  continue;
+}</code></pre>
+
+      <p>
+        The random walk does not add radiance at every interior scatter. An interior scattering only updates the path
+        throughput and samples a new direction. The light estimate occurs when the walk exits the volume.
+        If the ray never internally scattered, the code treats the event as a ballistic transmission and continues the
+        camera path through the object. Otherwise, if the ray did scatter internally, the light estimate is becomes a surface sample of scene lights from that exit point.
+        The integrator tests for visibility with a shadow ray, applies Fresnel transmission through the boundary, then adds the surviving contribution back to the camera path
+        <a class="cite" href="#ref-pbrt">[1, pp. 821-824]</a>.
+      </p>
+      <pre><code>// src/pathtracer/pathtracer.cpp
+if (!scattered) {
+  Ray ballistic_ray(exit_p + direction * EPS_F, direction);
+  ballistic_ray.depth = r.depth > 0 ? r.depth - 1 : 0;
+  L_out += throughput * base_tint * trace_continuation(ballistic_ray);
+  return L_out;
+}</code></pre>
+      <pre><code>// src/pathtracer/pathtracer.cpp
+Vector3D exit_origin = exit_p + exit_normal * EPS_F;
+Vector3D exit_direct;
+for (SceneLight* current_light : scene-&gt;lights) {
+  Vector3D light_direction;
+  double distance_to_light;
+  double light_pdf;
+  Vector3D light_radiance =
+      current_light-&gt;sample_L(exit_origin, &amp;light_direction,
+                              &amp;distance_to_light, &amp;light_pdf);
+  if (light_pdf &lt;= 0.0) continue;
+
+  double cos_light = dot(light_direction, exit_normal);
+  if (cos_light &lt;= 0.0) continue;
+
+  Ray shadow_ray(exit_origin, light_direction);
+  shadow_ray.max_t = distance_to_light - EPS_F;
+  if (!bvh-&gt;has_intersection(shadow_ray)) {
+    double light_fresnel = schlick_fresnel(cos_light, 1.0, eta);
+    exit_direct += light_radiance * (1.0 - light_fresnel) *
+                   cos_light / light_pdf;
+  }
+}
+
+L_out += throughput * base_tint * exit_direct / PI;</code></pre>
+      <p>
+        Spheres are handled in the obvious way. Triangle meshes, on the other hand, are handled by treating the mesh as a closed boundary. After the
+        ray enters the surface it traces through the BVH to find the next
+        intersection and accepts that hit only if it belongs to the same mesh as the entry triangle. The interior volume 
+        is thus defined to be wherever a ray can travel from one triangle
+        of the mesh to another triangle of the same mesh. Hence why this requires water tight meshes.
+      </p>
+      <pre><code>// src/pathtracer/pathtracer.cpp
+bool same_subsurface_volume(const Primitive* volume_primitive,
+                            const Primitive* hit_primitive) {
+  if (volume_primitive == hit_primitive) return true;
+
+  const Triangle* volume_triangle =
+      dynamic_cast&lt;const Triangle*&gt;(volume_primitive);
+  const Triangle* hit_triangle = dynamic_cast&lt;const Triangle*&gt;(hit_primitive);
+  return volume_triangle &amp;&amp; hit_triangle &amp;&amp; volume_triangle-&gt;mesh &amp;&amp;
+         volume_triangle-&gt;mesh == hit_triangle-&gt;mesh;
+}
+
+Ray boundary_ray(position, direction);
+boundary_ray.min_t = EPS_F;
+if (!bvh-&gt;intersect(boundary_ray, &amp;boundary_isect)) return false;
+if (!same_subsurface_volume(volume_primitive, boundary_isect.primitive)) {
+  return false;
+}</code></pre>
+      <p>
+        Tinting is added to allow us to more easily compare random walk SSS with our other methods of subsurface scattering. 
+        We computes a base tint
+        <code>c_b=clamp(base_color * saturation)</code> that is multiplied with the exit contribution after the random walk. 
+        The <code>base_color</code> and <code>saturation</code> are parameters that can be set by the user. 
+        This gives us a way of giving a shade to our lip gloss choices.
+        </p><p>
+        The color coming from the random walk/underlying skin is determined by our chromatic absorption coefficient (\(\sigma_a\)). It has red,
+        blue, and green channels. The larger the color channel of \(\sigma_a\), the more of the corresponding color contribution is attenuated by
+        \(T(d)=\exp(-\sigma_a d)\). 
+      </p>
+      <p>
+        The semi-glossy boundary itself is modeled as a Fresnel microfacet reflector. At entry, Schlick Fresnel
+        <a class="cite" href="#ref-schlick">[3]</a> estimates how much light reflects from the dielectric interface
+        before entering the volume. The direct and recursive glossy boundary terms use a GGX normal distribution and Smith
+        masking term <a class="cite" href="#ref-ggx">[1, pp. 573-578]</a>, so lower roughness produces stronger highlights while higher
+        <code>specular_weight</code> assigns more energy to the boundary layer. 
+      </p>
+
+      <h3>Results</h3>
+      <p>
+        The following comparisons on the <code>lips2.dae</code> scene demonstrate the impact of the bias fix described in section [blank for now]:
+      </p>
+      <div style="display: flex; flex-direction: column; align-items: center;">
+        <table class="screenshot-grid">
+          <tr>
+            <td>
+              <img src="images/results/lips2_screenshot_5-4_18-57-54.png" />
+              <figcaption>
+                Legacy Disney sampler: Scene
+                <code>lips2.dae</code>; 1280x960; 64 spp; max ray depth 5; light samples 2; roughness 0.18;
+                thickness 0.45; base color (0.82, 0.22, 0.26); saturation 1.2; IOR 1.5.
+              </figcaption>
+            </td>
+            <td>
+              <img src="images/results/lips2_disney_fixed_mixture_depth5_s64_l2.png" />
+              <figcaption>
+                Fixed Disney sampler. Scene <code>lips2.dae</code>; 640x480; 64 spp; max ray depth 5;
+                light samples 2; roughness 0.18; thickness 0.45; base color (0.82, 0.22, 0.26); saturation 1.2; IOR 1.5.
+              </figcaption>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <p>
+        The following random walk renders use <code>lips2.dae</code> mesh with its
+        material changed to <code>random_walk_layered</code>. They are full frame renders with max ray depth 4 and
+        64 samples per pixel. The material tint is fixed while one parameter group is changed at a time. Higher
+        specular weight and lower roughness sharpen the gloss. Positive \(g\) biases scattering forward.
+        Higher scale decreases average mean free path which the number of rays that continue reflecting until hitting the cap.
+      </p>
+      <p class="small">
+        Random-walk layered coefficient sets used below. Baseline: \(\sigma_a=(0.013,0.070,0.145)\),
+        \(\sigma_s=(1.09,1.59,1.79)\), \(g=0.0\), IOR 1.3, scale 5.0, surface roughness 0.18,
+        specular weight 0.45, derived base-layer weight 0.55, base color (0.82,0.22,0.26), saturation 1.2.
+        More gloss: same except surface roughness 0.12, specular weight 0.55, derived base-layer weight 0.45.
+        Forward scattering: same as baseline except \(g=0.55\). Shorter mean free path: same as baseline except
+        scale 8.0.
+      </p>
+      <div style="display: flex; flex-direction: column; align-items: center;">
+        <table class="screenshot-grid">
+          <tr>
+            <td>
+              <img src="images/results/rw_layered_base.png" />
+              <figcaption>Random-walk layered baseline.</figcaption>
+            </td>
+            <td>
+              <img src="images/results/rw_layered_glossier.png" />
+              <figcaption>More gloss: specular weight 0.55, roughness 0.12.</figcaption>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <img src="images/results/rw_layered_forward_g.png" />
+              <figcaption>Forward scattering: \(g = 0.55\).</figcaption>
+            </td>
+            <td>
+              <img src="images/results/rw_layered_scale8.png" />
+              <figcaption>Shorter mean free path: scale 8.0.</figcaption>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <h2>References</h2>
+      <ol class="references small">
+        <li id="ref-pbrt">
+          M. Pharr, W. Jakob, and G. Humphreys, <i>Physically Based Rendering: From Theory to Implementation</i>,
+          4th ed. Cambridge, MA: MIT Press, 2023. Cited for the Monte Carlo estimator, pp. 56-58; path tracing,
+          pp. 821-824; microfacet roughness, pp. 571-583; and Henyey-Greenstein phase functions, pp. 711-713.
+          Online: <a href="https://pbr-book.org/4ed/contents">https://pbr-book.org/4ed/contents</a>.
+        </li>
+        <li id="ref-henyey-greenstein">
+          L. G. Henyey and J. L. Greenstein, "Diffuse Radiation in the Galaxy," <i>The Astrophysical Journal</i>,
+          vol. 93, pp. 70-83, 1941. Online:
+          <a href="https://articles.adsabs.harvard.edu/pdf/1941ApJ....93...70H">https://articles.adsabs.harvard.edu/pdf/1941ApJ....93...70H</a>.
+        </li>
+        <li id="ref-schlick">
+          C. Schlick, "An Inexpensive BRDF Model for Physically-Based Rendering," <i>Computer Graphics Forum</i>,
+          vol. 13, no. 3, pp. 233-246, 1994. Online:
+          <a href="https://diglib.eg.org/items/581037f7-1e5c-4859-a107-6dfeeb8f3ccb">https://diglib.eg.org/items/581037f7-1e5c-4859-a107-6dfeeb8f3ccb</a>.
+        </li>
+        <li id="ref-mjp-sss">
+          M. Pettineo, "An Introduction To Real-Time Subsurface Scattering," <i>The Danger Zone</i>, Oct. 6, 2019.
+          Online: <a href="https://therealmjp.github.io/posts/sss-intro/">https://therealmjp.github.io/posts/sss-intro/</a>.
+        </li>
+        <li id="ref-chiang">
+          M. J.-Y. Chiang, P. Kutz, and B. Burley, "Practical and Controllable Subsurface Scattering for Production
+          Path Tracing," <i>SIGGRAPH 2016 Talks</i>, 2016. Online:
+          <a href="https://disneyanimation.com/publications/practical-and-controllable-subsurface-scattering-for-production-path-tracing/">https://disneyanimation.com/publications/practical-and-controllable-subsurface-scattering-for-production-path-tracing/</a>.
+        </li>
+      </ol>
+    </div>
+  </body>
+</html>
